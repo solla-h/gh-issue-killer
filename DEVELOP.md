@@ -303,7 +303,9 @@ worktree and local branch, set `done`.
    first, otherwise the gate would keep checking the old head.
 
 A round that truly produces no change annotates the verdict with
-`（自动修复未产生改动）` and ends the loop. Exhausting the budget parks the issue
+`（自动修复未产生改动）` and ends the loop. After a push the gate waits for the
+PR head to report the new commit (`waitForPRHead`) before concluding that
+nothing moved; a single read is racy. Exhausting the budget parks the issue
 as `blocked` and the message says how many attempts ran.
 
 ## 10. Checks, manifest and screenshots

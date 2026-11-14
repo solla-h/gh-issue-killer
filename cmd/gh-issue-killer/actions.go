@@ -1591,7 +1591,7 @@ func settleCIGate(ctx context.Context, app *AppContext, issue Issue, pr PullRequ
 		"",
 		"- " + reason,
 		"",
-		fmt.Sprintf(app.text(number, "ci.blocked.hint"), app.AgentLogin),
+		app.text(number, "ci.blocked.hint"),
 	}, "\n"))
 	return false, rounds
 }
@@ -1709,7 +1709,9 @@ func ciGateWithRepairs(ctx context.Context, app *AppContext, issue Issue, st Iss
 			verdict.Note += app.text(number, "ci.no_change_suffix")
 			break
 		}
-		refreshed, err := app.GH.GetPR(ctx, app.Repo.FullName, st.PRNumber)
+		// GitHub needs a moment to report the new head; a single read is not
+		// enough and used to abort a repair round whose push had succeeded.
+		refreshed, err := waitForPRHead(ctx, app, st.PRNumber, sha, 2*time.Minute)
 		if err != nil {
 			return verdict, rounds, fmt.Errorf("get PR after CI repair: %w", err)
 		}
