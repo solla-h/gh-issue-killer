@@ -347,10 +347,10 @@ Parsed in `config.go`, documented in DEPLOY.md §4.1. Defaults that matter to
 the code: `pollIntervalSec` 30, `webhook` true, `maxFixRounds` 3 (local checks
 **and** CI repair rounds), `planParallel` 5, `implementParallel` 1,
 `planTimeoutMin` 15, `implementTimeoutMin` 60, `webPort` 0 (off), `selfUpdate`
-false, `worktreeRoot` = state dir, `replyLanguage` `auto` (the coding agent
+false, `worktreeRoot` = state dir, `language` `auto` (the coding agent
 writes in the issue's or PR's language; a language tag forces one and is passed
 to the prompts as `{{LANGUAGE}}`). `repos` also accepts an object for per-repo
-`codingAgent`/`model`/`approvers`/`worktreeRoot`/`replyLanguage`.
+`codingAgent`/`model`/`approvers`/`worktreeRoot`/`language`.
 
 A valid `config.json` save triggers a graceful re-exec: jobs finish, state is
 saved, `syscall.Exec` replaces the process (same pid).
@@ -417,7 +417,8 @@ must stay clean; `gofmt -l .` must print nothing.
 - User-facing scaffolding never hardcodes a language: every heading, hint and
   footer goes through `app.text(number, "key")`, with the key present in both
   `scaffoldZH` and `scaffoldEN` in `messages.go`. The language comes from
-  `replyLanguage` (explicit) or from the issue/PR text (`detectLanguage`).
+  `language` (explicit; `replyLanguage` is the deprecated alias) or from the
+  issue/PR text (`detectLanguage`).
 - GitHub check runs are not the same as workflow runs: check runs come from
   `/commits/{sha}/check-runs`, job logs from `/actions/jobs/{id}/logs` (the id
   is in the check run’s `details_url`).

@@ -318,6 +318,9 @@ func main() {
 	if cfg.DeprecatedMaxParallel {
 		log.Warn("config.maxParallel is deprecated; rename it to implementParallel")
 	}
+	if cfg.DeprecatedReplyLanguage {
+		log.Warn("config.replyLanguage is deprecated; rename it to language")
+	}
 	checkedAgents := map[string]bool{}
 	for _, repo := range cfg.Repos {
 		if checkedAgents[repo.CodingAgent] {

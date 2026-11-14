@@ -183,7 +183,7 @@ replies on the PR instead of failing.
 
 `codingAgent` is `opencode`, `claude` or `codex`. `approvers` are human logins
 allowed to command the bot. `proxy` accepts `socks5h://`, `socks5://`,
-`http://` or `https://` and applies to both the API and git. `replyLanguage`
+`http://` or `https://` and applies to both the API and git. `language`
 defaults to `auto` (write in the issue's or PR's language) and also controls the
 daemon's own headings and hints; set it to `en`, `zh-CN`, `ja`, … to force one.
 

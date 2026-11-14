@@ -51,7 +51,7 @@ A change that alters behaviour but leaves these files stale is incomplete.
 - Keep error messages actionable. GitHub comment scaffolding (headings, hints,
   footers) never hardcodes a language: use `app.text(number, "key")` and add the
   key to both `scaffoldZH` and `scaffoldEN` in `messages.go`. The language is
-  `replyLanguage`, falling back to the issue/PR text (`detectLanguage`). Code
+  `language`, falling back to the issue/PR text (`detectLanguage`). Code
   and logs stay English.
 - Every new branch in the CI gate, command keyword, phase transition or
   scheduler rule needs a unit test next to the code (`newFakeAPI` for GitHub,

@@ -7,7 +7,7 @@ import (
 )
 
 // Scaffolding text around the agent's own prose (headings, hints, footers) is
-// translated here. The agent writes in the language chosen by replyLanguage;
+// translated here. The agent writes in the language chosen by config.language;
 // the daemon's own fixed comments follow the same choice, falling back to
 // English for languages without a catalog.
 var scaffoldZH = map[string]string{
@@ -193,11 +193,11 @@ var scaffoldEN = map[string]string{
 }
 
 // language is the concrete scaffolding language for a task: an explicit
-// replyLanguage wins, otherwise the issue/PR text decides.
+// config.language wins, otherwise the issue/PR text decides.
 func (app *AppContext) language(number int) string {
-	configured := strings.TrimSpace(app.Repo.ReplyLanguage)
+	configured := strings.TrimSpace(app.Repo.Language)
 	if configured == "" && app.Cfg != nil {
-		configured = strings.TrimSpace(app.Cfg.ReplyLanguage)
+		configured = strings.TrimSpace(app.Cfg.Language)
 	}
 	if configured != "" && !strings.EqualFold(configured, "auto") {
 		if strings.HasPrefix(strings.ToLower(configured), "zh") {

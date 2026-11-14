@@ -190,9 +190,9 @@ Optional: `pollIntervalSec` (30), `webhook` (true), `maxFixRounds` (3),
 `planParallel` (5) and `implementParallel` (1), both **per repository**,
 `selfUpdate` (false), `webPort` (0 = off; `8787` serves the dashboard on
 127.0.0.1), `planTimeoutMin` (15), `implementTimeoutMin` (60),
-`worktreeRoot` (state dir), `replyLanguage` (`auto`).
+`worktreeRoot` (state dir), `language` (`auto`).
 
-`replyLanguage` controls the language the coding agent writes in — plans,
+`language` controls the language the coding agent writes in — plans,
 summaries, PR bodies and review findings — and the daemon's own scaffolding
 (headings, hints, merge prompts). The default `auto` follows the language of the
 issue or pull request. Set it to a language name or tag (`en`, `zh-CN`, `ja`, …)
@@ -200,7 +200,8 @@ to force one. Scaffolding has Chinese and English catalogs; other languages fall
 back to English while the agent still writes in the chosen language.
 
 Per-repo overrides: the `repos` object form can set `codingAgent`, `model`,
-`approvers`, `worktreeRoot`, or `replyLanguage` for one repository.
+`approvers`, `worktreeRoot`, or `language` for one repository. The old name
+`replyLanguage` still works but is deprecated.
 
 The running daemon watches the config file with the OS notification API
 (inotify / kqueue via fsnotify, debounced, with a 30 s safety poll). A valid save

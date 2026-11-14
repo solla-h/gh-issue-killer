@@ -58,12 +58,12 @@ func TestScaffoldText(t *testing.T) {
 func TestAppTextFollowsConfiguredLanguage(t *testing.T) {
 	app := &AppContext{
 		Cfg:  &Config{},
-		Repo: RepoConfig{ReplyLanguage: "en"},
+		Repo: RepoConfig{Language: "en"},
 	}
 	if got := app.text(1, "merge.done.title"); got != "### 🤖 Done" {
 		t.Fatalf("configured en = %q", got)
 	}
-	app.Repo.ReplyLanguage = "zh-CN"
+	app.Repo.Language = "zh-CN"
 	if got := app.text(1, "merge.done.title"); got != "### 🤖 已完成" {
 		t.Fatalf("configured zh = %q", got)
 	}
