@@ -1051,6 +1051,10 @@ func doMergePR(ctx context.Context, app *AppContext, trigger Trigger, pr PullReq
 		RunDir:       runDir,
 	}
 	rounds := 0
+	// GitHub can still report the pre-push "dirty" state for a head we just
+	// fixed; skip one round of conflict handling so a single conflict does not
+	// look like two.
+	skipConflictCheck := false
 	for {
 		pr, err = waitForMergeable(ctx, app, number, time.Minute)
 		if err != nil {
@@ -1060,7 +1064,7 @@ func doMergePR(ctx context.Context, app *AppContext, trigger Trigger, pr PullReq
 		if pr.State != "open" {
 			return
 		}
-		if mergeBlockedByConflicts(pr) {
+		if !skipConflictCheck && mergeBlockedByConflicts(pr) {
 			if rounds >= app.Cfg.MaxFixRounds {
 				reason := fmt.Sprintf(app.text(number, "conflict.blocked"), app.Local.Base, rounds)
 				_, _ = app.GH.PostComment(ctx, app.Repo.FullName, number,
@@ -1077,8 +1081,10 @@ func doMergePR(ctx context.Context, app *AppContext, trigger Trigger, pr PullReq
 				postReviewFailure(ctx, app, number, err)
 				return
 			}
+			skipConflictCheck = true
 			continue
 		}
+		skipConflictCheck = false
 		if verdict := waitForChecks(ctx, app, pr.Head.SHA, pr.Base.Ref, 10*time.Minute); !verdict.OK {
 			_, _ = app.GH.PostComment(ctx, app.Repo.FullName, number,
 				fmt.Sprintf("%s\n\n%s\n\n- %s\n\n%s", app.text(number, "ci.blocked.title"),
