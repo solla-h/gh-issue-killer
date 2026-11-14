@@ -2,13 +2,15 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
-func TestNormalizeReposReplyLanguage(t *testing.T) {
+func TestNormalizeReposLanguage(t *testing.T) {
 	inherited, err := normalizeRepos(json.RawMessage(`["acme/one"]`), repoOptions{Language: "zh-CN"})
 	if err != nil {
 		t.Fatal(err)
@@ -17,7 +19,7 @@ func TestNormalizeReposReplyLanguage(t *testing.T) {
 		t.Fatalf("inherited language = %q, want zh-CN", got)
 	}
 
-	overridden, err := normalizeRepos(json.RawMessage(`{"acme/two": {"replyLanguage": "en"}}`), repoOptions{Language: "zh-CN"})
+	overridden, err := normalizeRepos(json.RawMessage(`{"acme/two": {"language": "en"}}`), repoOptions{Language: "zh-CN"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,49 +36,40 @@ func TestNormalizeReposReplyLanguage(t *testing.T) {
 	}
 }
 
-func TestLanguageConfigAndLegacyAlias(t *testing.T) {
+func TestLanguageConfig(t *testing.T) {
 	dir := t.TempDir()
-	write := func(name, body string) string {
-		t.Helper()
-		path := filepath.Join(dir, name)
-		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		return path
+	path := filepath.Join(dir, "config.json")
+	body := `{"repos": ["acme/one"], "language": "en"}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
 	}
-
-	cfg, err := loadConfig(write("new.json", `{"repos": ["acme/one"], "language": "en"}`))
+	cfg, err := loadConfig(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Language != "en" || cfg.Repos[0].Language != "en" {
 		t.Fatalf("language = %q, repo = %q", cfg.Language, cfg.Repos[0].Language)
 	}
-	if cfg.DeprecatedReplyLanguage {
-		t.Fatal("new key flagged as deprecated")
-	}
 
-	legacy, err := loadConfig(write("legacy.json", `{"repos": ["acme/one"], "replyLanguage": "zh-CN"}`))
+	defaults, err := loadConfig(writeTemp(t, dir, `{"repos": ["acme/one"]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if legacy.Language != "zh-CN" || legacy.Repos[0].Language != "zh-CN" {
-		t.Fatalf("legacy language = %q, repo = %q", legacy.Language, legacy.Repos[0].Language)
-	}
-	if !legacy.DeprecatedReplyLanguage {
-		t.Fatal("replyLanguage alias was not flagged as deprecated")
-	}
-
-	precedence, err := loadConfig(write("both.json", `{"repos": ["acme/one"], "language": "en", "replyLanguage": "zh-CN"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if precedence.Language != "en" {
-		t.Fatalf("language = %q, want the new key to win", precedence.Language)
+	if defaults.Language != "auto" || defaults.Repos[0].Language != "auto" {
+		t.Fatalf("default language = %q / %q, want auto", defaults.Language, defaults.Repos[0].Language)
 	}
 }
 
-func TestReplyLanguage(t *testing.T) {
+func writeTemp(t *testing.T, dir, body string) string {
+	t.Helper()
+	path := filepath.Join(dir, fmt.Sprintf("config-%d.json", time.Now().UnixNano()))
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestPromptLanguage(t *testing.T) {
 	auto := &AppContext{
 		Cfg:  &Config{Language: "auto"},
 		Repo: RepoConfig{Language: "auto"},

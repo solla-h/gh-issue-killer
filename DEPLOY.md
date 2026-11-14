@@ -200,8 +200,7 @@ to force one. Scaffolding has Chinese and English catalogs; other languages fall
 back to English while the agent still writes in the chosen language.
 
 Per-repo overrides: the `repos` object form can set `codingAgent`, `model`,
-`approvers`, `worktreeRoot`, or `language` for one repository. The old name
-`replyLanguage` still works but is deprecated.
+`approvers`, `worktreeRoot`, or `language` for one repository.
 
 The running daemon watches the config file with the OS notification API
 (inotify / kqueue via fsnotify, debounced, with a 30 s safety poll). A valid save

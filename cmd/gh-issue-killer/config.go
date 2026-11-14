@@ -42,25 +42,24 @@ type RepoConfig struct {
 }
 
 type Config struct {
-	File                    string
-	Repos                   []RepoConfig
-	Proxy                   string
-	PollInterval            time.Duration
-	Webhook                 bool
-	MaxFixRounds            int
-	PlanParallel            int
-	ImplementParallel       int
-	SelfUpdate              bool
-	WebPort                 int
-	DeprecatedMaxParallel   bool
-	PlanTimeout             time.Duration
-	ImplementTimeout        time.Duration
-	CodingAgent             string
-	Model                   string
-	Approvers               []string
-	DeprecatedAgent         string
-	Language                string
-	DeprecatedReplyLanguage bool
+	File                  string
+	Repos                 []RepoConfig
+	Proxy                 string
+	PollInterval          time.Duration
+	Webhook               bool
+	MaxFixRounds          int
+	PlanParallel          int
+	ImplementParallel     int
+	SelfUpdate            bool
+	WebPort               int
+	DeprecatedMaxParallel bool
+	PlanTimeout           time.Duration
+	ImplementTimeout      time.Duration
+	CodingAgent           string
+	Model                 string
+	Approvers             []string
+	DeprecatedAgent       string
+	Language              string
 }
 
 type repoOptions struct {
@@ -70,8 +69,6 @@ type repoOptions struct {
 	Approvers    []string `json:"approvers"`
 	WorktreeRoot string   `json:"worktreeRoot"`
 	Language     string   `json:"language"`
-	// ReplyLanguage is the old name for language.
-	ReplyLanguage string `json:"replyLanguage"`
 }
 
 type rawConfig struct {
@@ -98,8 +95,6 @@ type rawConfig struct {
 	// Language is the language the agent and the daemon's scaffolding write in.
 	// Empty or "auto" follows the language of the issue or pull request.
 	Language string `json:"language"`
-	// ReplyLanguage is the old name for language.
-	ReplyLanguage string `json:"replyLanguage"`
 }
 
 func defaultConfigPath() string {
@@ -179,7 +174,7 @@ func normalizeRepos(raw json.RawMessage, defaults repoOptions) ([]RepoConfig, er
 			Model:        model,
 			Approvers:    approvers,
 			WorktreeRoot: firstNonEmpty(expandHome(entry.WorktreeRoot), defaults.WorktreeRoot),
-			Language:     firstNonEmpty(entry.Language, entry.ReplyLanguage, defaults.Language, "auto"),
+			Language:     firstNonEmpty(entry.Language, defaults.Language, "auto"),
 		})
 	}
 	return repos, nil
@@ -248,7 +243,7 @@ func loadConfig(file string) (*Config, error) {
 		Model:             strings.TrimSpace(raw.Model),
 		Approvers:         raw.Approvers,
 		DeprecatedAgent:   strings.TrimSpace(raw.Agent),
-		Language:          firstNonEmpty(raw.Language, raw.ReplyLanguage, "auto"),
+		Language:          firstNonEmpty(raw.Language, "auto"),
 	}
 	if raw.Webhook != nil {
 		cfg.Webhook = *raw.Webhook
@@ -262,9 +257,6 @@ func loadConfig(file string) (*Config, error) {
 	if raw.ImplementParallel == 0 && raw.MaxParallel != 0 {
 		cfg.ImplementParallel = raw.MaxParallel
 		cfg.DeprecatedMaxParallel = true
-	}
-	if strings.TrimSpace(raw.Language) == "" && strings.TrimSpace(raw.ReplyLanguage) != "" {
-		cfg.DeprecatedReplyLanguage = true
 	}
 	if cfg.PlanParallel == 0 {
 		cfg.PlanParallel = 5

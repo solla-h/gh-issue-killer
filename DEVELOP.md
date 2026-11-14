@@ -417,8 +417,7 @@ must stay clean; `gofmt -l .` must print nothing.
 - User-facing scaffolding never hardcodes a language: every heading, hint and
   footer goes through `app.text(number, "key")`, with the key present in both
   `scaffoldZH` and `scaffoldEN` in `messages.go`. The language comes from
-  `language` (explicit; `replyLanguage` is the deprecated alias) or from the
-  issue/PR text (`detectLanguage`).
+  `language` (explicit) or from the issue/PR text (`detectLanguage`).
 - GitHub check runs are not the same as workflow runs: check runs come from
   `/commits/{sha}/check-runs`, job logs from `/actions/jobs/{id}/logs` (the id
   is in the check run’s `details_url`).
