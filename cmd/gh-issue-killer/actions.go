@@ -983,7 +983,7 @@ func doModifyPR(ctx context.Context, app *AppContext, trigger Trigger, pr PullRe
 		postReviewFailure(ctx, app, number, fmt.Errorf("commit: %w", err))
 		return
 	}
-	if err := pushBranchTo(ctx, worktree, prPushURL(app, pr), app.Env, pr.Head.Ref); err != nil {
+	if err := pushBranchTo(ctx, worktree, prPushURL(app, pr), app.Env, branch, pr.Head.Ref); err != nil {
 		postReviewFailure(ctx, app, number, fmt.Errorf("push to %s: %w", pr.Head.Repo.FullName, err))
 		return
 	}

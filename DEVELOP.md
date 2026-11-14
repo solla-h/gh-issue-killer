@@ -145,6 +145,7 @@ is re-read from the API before acting, and deliveries are de-duplicated.
 | `合并`, `merge`, `ship` | merge |
 | `cancel`, `stop`, `停止` | cancel |
 | `review`, `review pr`, `cr`, `审查` (the target is a pull request) | review the PR and post a GitHub review |
+| `apply`, `apply review`, `应用` (the target is a pull request) | apply the latest bot review's findings without a new review |
 | `<approval word> <free text>` (`ok`, `yes`, `go`, …) | approve **and** forward the rest as `ExtraNotes` to the implementation |
 
 Other rules:

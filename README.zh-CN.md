@@ -118,6 +118,7 @@ go build -o bin/gh-issue-killer ./cmd/gh-issue-killer
 | `@agent 合并`、`@agent merge`、`@agent ship` | squash merge PR，关 issue + PR，清理 worktree |
 | `@agent review`、`@agent cr`（在 PR 上） | 审查这个 PR 的 diff，发表总结 + 行内意见 |
 | `@agent <指令>`（在 PR 上） | 直接改这个 PR：agent 改代码、跑检查，把提交推到 PR head |
+| `@agent apply`、`@agent 应用`（在 PR 上） | 直接按最近一次 review 的意见修改，不再重跑 review |
 | `@agent cancel`、`@agent stop`、`@agent 停止` | 中止当前任务 |
 | plan 评论上的 👍 | 等同 `@agent lgtm` |
 | PR 公告评论上的 👍 | 等同 `@agent 合并` |

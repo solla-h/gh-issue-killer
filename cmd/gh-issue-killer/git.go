@@ -300,17 +300,18 @@ func changedFiles(ctx context.Context, dir string, local *LocalRepo) []string {
 }
 
 func pushBranch(ctx context.Context, dir string, local *LocalRepo, branch string) error {
-	return pushBranchTo(ctx, dir, local.HTTPSURL, local.Env, branch)
+	return pushBranchTo(ctx, dir, local.HTTPSURL, local.Env, branch, branch)
 }
 
-// pushBranchTo pushes to an explicit remote, which may be another repository
-// (a pull request head that lives in a fork the author opened for maintainers).
-func pushBranchTo(ctx context.Context, dir, remoteURL string, env []string, branch string) error {
+// pushBranchTo pushes a local branch to an explicit remote ref. The remote may
+// be another repository: a pull request head that lives in a fork the author
+// opened for maintainers, where local and remote branch names differ.
+func pushBranchTo(ctx context.Context, dir, remoteURL string, env []string, localBranch, remoteBranch string) error {
 	git, err := gitBinary()
 	if err != nil {
 		return err
 	}
-	_, err = runCmd(ctx, git, []string{"push", remoteURL, branch + ":" + branch}, CmdOptions{
+	_, err = runCmd(ctx, git, []string{"push", remoteURL, localBranch + ":" + remoteBranch}, CmdOptions{
 		Cwd:     dir,
 		Env:     env,
 		Timeout: 10 * time.Minute,

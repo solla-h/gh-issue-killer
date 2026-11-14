@@ -42,6 +42,8 @@ func resolveCommand(body string, isApprover bool, agentLogin string) string {
 		return "cancel"
 	case "review", "review pr", "cr", "审查":
 		return "review"
+	case "apply", "apply review", "应用":
+		return "apply"
 	}
 	return ""
 }
@@ -454,7 +456,12 @@ func (r *Router) enqueueReviewFix(ctx context.Context, app *AppContext, fullName
 	key := fmt.Sprintf("%s#%d#reviewfix", fullName, number)
 	r.enqueue(fullName, key, stageWork, func(jobCtx context.Context) {
 		issue, err := app.GH.GetIssue(jobCtx, fullName, number)
-		if err != nil || issue.State != "open" || issue.PullRequest == nil {
+		if err != nil || issue.State != "open" {
+			return
+		}
+		if issue.PullRequest == nil {
+			_, _ = app.GH.PostComment(jobCtx, fullName, number,
+				fmt.Sprintf(app.text(number, "router.review_not_pr"), r.agentLogin))
 			return
 		}
 		pr, err := app.GH.GetPR(jobCtx, fullName, number)
@@ -891,6 +898,11 @@ func (r *Router) HandleTrigger(ctx context.Context, fullName string, trigger Tri
 				}
 				doImplement(jobCtx, app, trigger, issue, st)
 			})
+			return
+		}
+
+		if command == "apply" && isApprover {
+			r.enqueueReviewFix(ctx, app, fullName, trigger.IssueNumber, trigger.Sender)
 			return
 		}
 

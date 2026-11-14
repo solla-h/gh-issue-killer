@@ -16,6 +16,11 @@ func TestResolveReviewCommand(t *testing.T) {
 			t.Fatalf("%q -> %q, want review", body, got)
 		}
 	}
+	for _, body := range []string{"@bot apply", "@bot apply review", "@bot 应用"} {
+		if got := resolveCommand(body, true, "bot"); got != "apply" {
+			t.Fatalf("%q -> %q, want apply", body, got)
+		}
+	}
 }
 
 func TestLoadReviewResult(t *testing.T) {

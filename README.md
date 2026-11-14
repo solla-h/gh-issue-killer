@@ -137,6 +137,7 @@ Open an issue that mentions the bot (or assign it to the bot). Then:
 | `@agent 合并`, `@agent merge`, `@agent ship` | squash merge the PR, close issue + PR, clean the worktree |
 | `@agent review`, `@agent cr` (on a pull request) | review that PR's diff and post a summary plus inline findings |
 | `@agent <instruction>` (on a pull request) | change that PR: the agent edits the branch, runs the checks and pushes to the PR head |
+| `@agent apply`, `@agent 应用` (on a pull request) | apply the findings of the latest bot review without running a new one |
 | `@agent cancel`, `@agent stop`, `@agent 停止` | abort the current task |
 | 👍 on the plan comment | same as `@agent lgtm` |
 | 👍 on the PR-announcement comment | same as `@agent 合并` |
