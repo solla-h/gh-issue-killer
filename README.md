@@ -78,8 +78,9 @@ flowchart LR
 - **Live console.** Set `webPort` and open `http://127.0.0.1:<port>`: per-repo
   queues, active jobs, every task's stage rail, PR links, checks, screenshots
   and the daemon log in one board. Plans render as markdown, the board follows
-  the system theme or can be pinned to light/dark, and the detail drawer can
-  approve or cancel the task.
+  the system theme or can be pinned to light/dark, tasks can be filtered by
+  project, and the detail drawer can approve or cancel the task. The header
+  counts the tasks waiting for you (approval, merge or unblock).
 
 ## Install with a coding agent
 

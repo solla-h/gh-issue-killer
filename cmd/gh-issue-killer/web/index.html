@@ -187,6 +187,10 @@
     background: transparent;
   }
   .chip[aria-pressed="true"] { border-color: var(--work); color: var(--work); }
+  .repo-filter {
+    background: var(--ink-2); border: 1px solid var(--rule); color: var(--text);
+    padding: 4px 7px; font: inherit; font-size: 11px; max-width: 240px;
+  }
   .search {
     margin-left: auto; background: var(--ink-2); border: 1px solid var(--rule); color: var(--text);
     padding: 4px 9px; font: inherit; font-size: 11px; width: 210px;
@@ -379,6 +383,7 @@
     .board td.time-cell, .board td.pr-cell { display: inline-block; }
     .issue-cell { max-width: none; }
     .search { width: 100%; margin-left: 0; }
+    .repo-filter { width: 100%; max-width: none; }
   }
 </style>
 </head>
@@ -396,7 +401,7 @@
       <div class="stat"><b id="s-daemon"><span class="lamp live"></span>live</b><small>DAEMON</small></div>
       <div class="stat"><b id="s-active">0</b><small>ACTIVE</small></div>
       <div class="stat"><b id="s-queued">0</b><small>QUEUED</small></div>
-      <div class="stat"><b id="s-repos">0</b><small>REPOS</small></div>
+      <div class="stat"><b id="s-waiting">0</b><small>待我处理</small></div>
       <div class="stat"><b id="s-uptime">0m</b><small>UPTIME</small></div>
     </div>
     <div class="theme" role="group" aria-label="主题">
@@ -437,6 +442,9 @@
       <button class="chip" data-filter="wait" aria-pressed="false">等我</button>
       <button class="chip" data-filter="blocked" aria-pressed="false">阻塞</button>
     </div>
+    <select class="repo-filter" id="repo-filter" aria-label="按项目过滤">
+      <option value="">全部项目</option>
+    </select>
     <input class="search" id="search" type="search" placeholder="搜索 issue 或仓库" aria-label="搜索">
   </div>
   <table class="board">
@@ -482,7 +490,7 @@
 <script>
 (() => {
   const $ = (id) => document.getElementById(id);
-  const state = { data: null, filter: "all", search: "", selected: null, logPaused: false, logOpen: true, failures: 0, down: false, live: false, drawerSig: "" };
+  const state = { data: null, filter: "all", repo: "", search: "", selected: null, logPaused: false, logOpen: true, failures: 0, down: false, live: false, drawerSig: "" };
 
   const icon = (cls) => {
     const span = document.createElement("span");
@@ -497,12 +505,15 @@
   };
 
   const CHIP_LABELS = { all: "全部", active: "正在处理", wait: "等我", blocked: "阻塞" };
+  // Phases where the ball is in the approver's court; mirrors phaseNeedsUser.
+  const WAIT_PHASES = ["awaiting_approval", "pr_open", "blocked"];
+  const needsMe = (task) => WAIT_PHASES.includes(task.phase);
 
   function updateChips(data) {
     const counts = {
       all: data.tasks.length,
       active: data.tasks.filter((t) => t.active || t.queued).length,
-      wait: data.tasks.filter((t) => t.phase === "awaiting_approval").length,
+      wait: data.tasks.filter(needsMe).length,
       blocked: data.tasks.filter((t) => t.phase === "blocked").length,
     };
     for (const chip of document.querySelectorAll(".chip")) {
@@ -751,7 +762,7 @@
     setText("s-config", data.configFile);
     setText("s-active", String(data.active));
     setText("s-queued", String(data.queued));
-    setText("s-repos", String(data.repos.length));
+    setText("s-waiting", String(data.waiting ?? data.tasks.filter(needsMe).length));
     setText("s-uptime", humanAge(data.uptimeSec));
     const planActive = data.tasks.filter((t) => t.active && t.phase === "planning").length;
     const workActive = data.tasks.filter((t) => t.active && (t.phase === "implementing" || t.phase === "merging")).length;
@@ -836,9 +847,35 @@
     return rail;
   }
 
+  function updateRepoFilter(data) {
+    const select = $("repo-filter");
+    const counts = new Map();
+    for (const task of data.tasks) counts.set(task.repo, (counts.get(task.repo) || 0) + 1);
+    const names = data.repos.map((repo) => repo.name);
+    for (const name of counts.keys()) if (!names.includes(name)) names.push(name);
+    if (state.repo && !names.includes(state.repo)) state.repo = "";
+    const signature = names.map((n) => `${n}:${counts.get(n) || 0}`).join("|") + `#${state.repo}`;
+    if (select.dataset.sig === signature) return;
+    select.dataset.sig = signature;
+    const fragment = document.createDocumentFragment();
+    const all = document.createElement("option");
+    all.value = "";
+    all.textContent = `全部项目 (${data.tasks.length})`;
+    fragment.appendChild(all);
+    for (const name of names) {
+      const option = document.createElement("option");
+      option.value = name;
+      option.textContent = `${name} (${counts.get(name) || 0})`;
+      fragment.appendChild(option);
+    }
+    select.replaceChildren(fragment);
+    select.value = state.repo;
+  }
+
   function matches(task) {
+    if (state.repo && task.repo !== state.repo) return false;
     if (state.filter === "active" && !(task.active || task.queued)) return false;
-    if (state.filter === "wait" && task.phase !== "awaiting_approval") return false;
+    if (state.filter === "wait" && !needsMe(task)) return false;
     if (state.filter === "blocked" && task.phase !== "blocked") return false;
     const needle = state.search.trim().toLowerCase();
     if (needle) {
@@ -1147,6 +1184,7 @@
       renderHeader(data);
       renderLines(data);
       updateChips(data);
+      updateRepoFilter(data);
       if (changed) renderTasks(data);
       if (state.selected) {
         const task = data.tasks.find((t) => t.repo === state.selected.repo && t.number === state.selected.number);
@@ -1188,6 +1226,10 @@
         if (state.data) renderTasks(state.data);
       });
     }
+    $("repo-filter").addEventListener("change", (event) => {
+      state.repo = event.target.value;
+      if (state.data) renderTasks(state.data);
+    });
     $("search").addEventListener("input", (event) => {
       state.search = event.target.value;
       if (state.data) renderTasks(state.data);

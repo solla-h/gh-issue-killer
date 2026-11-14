@@ -81,6 +81,7 @@ type webSnapshot struct {
 	WorkLimit  int       `json:"workLimit"`
 	Active     int       `json:"active"`
 	Queued     int       `json:"queued"`
+	Waiting    int       `json:"waiting"`
 	Repos      []webRepo `json:"repos"`
 	Tasks      []webTask `json:"tasks"`
 }
@@ -356,7 +357,22 @@ func (w *webServer) snapshot() webSnapshot {
 	sortTasks(snapshot.Tasks)
 	snapshot.Active = len(routerState.Active)
 	snapshot.Queued = len(routerState.Queued)
+	for _, task := range snapshot.Tasks {
+		if phaseNeedsUser(task.Phase) {
+			snapshot.Waiting++
+		}
+	}
 	return snapshot
+}
+
+// phaseNeedsUser reports whether a task is waiting for the approver: a plan to
+// approve, a merge/feedback decision, or a blocked task to unblock.
+func phaseNeedsUser(phase string) bool {
+	switch phase {
+	case "awaiting_approval", "pr_open", "blocked":
+		return true
+	}
+	return false
 }
 
 func sortTasks(tasks []webTask) {

@@ -367,7 +367,9 @@ saved, `syscall.Exec` replaces the process (same pid).
 Loopback only. Routes: `/`, `/api/state`, `/api/issue`, `/api/logs`,
 `/api/action` (approve/cancel; requires JSON content type and a loopback
 origin), `/logo.svg`. Queue depth in `/api/state` includes `plan`, `work` and
-`ci`.
+`ci`. `waiting` counts tasks whose phase needs the approver
+(`awaiting_approval`, `pr_open`, `blocked`, see `phaseNeedsUser`); the board can
+be filtered by phase, by project (the repo dropdown) and by free text.
 
 ## 16. Reload and self-update
 
