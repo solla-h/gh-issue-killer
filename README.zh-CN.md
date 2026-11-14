@@ -36,7 +36,8 @@ flowchart LR
 - **每个 issue 一个 worktree。** 独立分支、bot 提交作者，永远不碰你的工作区，
   重启后自动续跑。
 - **自己验证、自己修 CI。** 编码 agent 写下 `checks.json`，daemon 负责跑；失败、
-  CI 变红或卡住都回到 agent 手里，轮次用完才停在 `blocked`。
+  CI 变红或卡住都回到 agent 手里，轮次用完才停在 `blocked`。因 CI 失败停下的
+  任务，等 PR 检查转绿后会自动重试合并。
 - **一条评论驱动全程。** 批准、改 PR、解冲突、合并、取消都是评论或 👍；
   任何被监听仓库的 PR 都能交给它。
 - **多仓库、互不阻塞。** 每个仓库有自己的 agent、model、approvers 和队列，

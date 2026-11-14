@@ -44,7 +44,8 @@ resumes it.
 - **Verifies and repairs CI itself.** The coding agent writes the commands that
   prove its work (`checks.json`), the daemon runs them and hands failures back;
   a red or stuck PR check goes back to the agent too, and only an exhausted
-  budget parks the issue as `blocked`.
+  budget parks the issue as `blocked`. A task parked by failed checks resumes by
+  itself once the PR's checks turn green.
 - **Driven by one comment.** Approve, change a PR, resolve conflicts, merge or
   cancel with a comment or 👍 — on any PR in a watched repo, not only its own.
 - **Multi-repo, no cross-blocking.** Each repository has its own agent, model,

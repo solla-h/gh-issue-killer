@@ -308,6 +308,13 @@ PR head to report the new commit (`waitForPRHead`) before concluding that
 nothing moved; a single read is racy. Exhausting the budget parks the issue
 as `blocked` and the message says how many attempts ran.
 
+CI-blocked tasks are marked with `BlockedByCI: true`. `retryBlockedCI`, part of
+the 30 s poll, watches them: when the PR is open, not conflicting, and every
+check run finished green, it clears the flag and re-runs the merge path, so a
+transient CI failure does not need a manual `合并`. Other blocked reasons (local
+checks, an unreproducible bug, exhausted conflict rounds) never resume on their
+own.
+
 ## 10. Checks, manifest and screenshots
 
 `checks.json` (written by the agent) wins; otherwise `detectDefaultChecks`
@@ -402,6 +409,7 @@ keeps tests quiet. Notable coverage:
 | `modifypr_test.go` | which PR heads can be pushed (same repo, fork with allow-edits-by-maintainers) |
 | `messages_test.go` | scaffolding catalogs, `app.text` resolution, language detection |
 | `reactions_test.go` | polled 👍 on the review prompt (approver only, consumed once) |
+| `blocked_ci_test.go` | green-check detection, auto-resume of CI-blocked tasks, other reasons untouched |
 | `router_ci_test.go` | the CI queue does not block work; cancel stops CI jobs |
 | `gh_test.go` | label transitions and GitHub helpers |
 | `main_test.go` | proxy/env parsing, repo normalization, mentions and commands, closable phases |
@@ -455,7 +463,7 @@ must stay clean; `gofmt -l .` must print nothing.
 | thumbs-up semantics (`ReviewCommentID`) | §6 and §8 |
 | queue stages, worker counts, job keys, cancel/wait rules | §7 |
 | a stage’s steps or post conditions | §8 |
-| the CI gate, stuck detection, repair loop, `ci_fix` prompt | §9 |
+| the CI gate, stuck detection, repair loop, `ci_fix` prompt, CI auto-resume | §9 |
 | conflict detection, `conflict_fix` prompt, merge retry rules | §8 and §9 |
 | `checks.json` / `result.json` / screenshot rules | §10 |
 | new GitHub endpoints, labels, hook events | §11 |

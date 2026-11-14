@@ -377,6 +377,7 @@ func reportCheckFailures(ctx context.Context, app *AppContext, number int, workt
 	app.Store.UpdateIssue(app.Repo.FullName, number, func(state *IssueState) {
 		state.Phase = "blocked"
 		state.BlockedReason = "checks failed"
+		state.BlockedByCI = false
 		state.Checks = checkResults
 	})
 	app.GH.SetAgentState(ctx, app.Repo.FullName, number, awaitingLabel)
@@ -456,6 +457,7 @@ func doRevise(ctx context.Context, app *AppContext, trigger Trigger, issue Issue
 		app.Store.UpdateIssue(app.Repo.FullName, number, func(state *IssueState) {
 			state.Phase = "blocked"
 			state.BlockedReason = "bug not reproduced: " + summary
+			state.BlockedByCI = false
 		})
 		app.GH.SetAgentState(ctx, app.Repo.FullName, number, awaitingLabel)
 		_, _ = app.GH.PostComment(ctx, app.Repo.FullName, number, strings.Join([]string{
@@ -1212,6 +1214,7 @@ func doImplement(ctx context.Context, app *AppContext, trigger Trigger, issue Is
 		app.Store.UpdateIssue(app.Repo.FullName, number, func(state *IssueState) {
 			state.Phase = "blocked"
 			state.BlockedReason = "bug not reproduced: " + summary
+			state.BlockedByCI = false
 		})
 		app.GH.SetAgentState(ctx, app.Repo.FullName, number, awaitingLabel)
 		_, _ = app.GH.PostComment(ctx, app.Repo.FullName, number, strings.Join([]string{
@@ -1584,6 +1587,7 @@ func settleCIGate(ctx context.Context, app *AppContext, issue Issue, pr PullRequ
 	app.Store.UpdateIssue(app.Repo.FullName, number, func(state *IssueState) {
 		state.Phase = "blocked"
 		state.BlockedReason = reason
+		state.BlockedByCI = true
 	})
 	app.GH.SetAgentState(ctx, app.Repo.FullName, number, awaitingLabel)
 	_, _ = app.GH.PostComment(ctx, app.Repo.FullName, number, strings.Join([]string{
@@ -2169,6 +2173,7 @@ func doMerge(ctx context.Context, app *AppContext, trigger Trigger, issue Issue,
 				app.Store.UpdateIssue(app.Repo.FullName, number, func(state *IssueState) {
 					state.Phase = "blocked"
 					state.BlockedReason = reason
+					state.BlockedByCI = true
 				})
 				app.GH.SetAgentState(ctx, app.Repo.FullName, number, awaitingLabel)
 				_, _ = app.GH.PostComment(ctx, app.Repo.FullName, number,
@@ -2291,6 +2296,7 @@ func blockIssue(ctx context.Context, app *AppContext, number int, err error) {
 	app.Store.UpdateIssue(app.Repo.FullName, number, func(state *IssueState) {
 		state.Phase = "blocked"
 		state.BlockedReason = message
+		state.BlockedByCI = false
 	})
 	app.GH.SetAgentState(ctx, app.Repo.FullName, number, awaitingLabel)
 	_, _ = app.GH.PostComment(ctx, app.Repo.FullName, number,
