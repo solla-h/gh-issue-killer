@@ -446,6 +446,11 @@ func (r *Router) HandleReaction(ctx context.Context, fullName string, number int
 // enqueueReviewFix applies the findings of the PR's latest bot review, which is
 // what 👍 on the review prompt means.
 func (r *Router) enqueueReviewFix(ctx context.Context, app *AppContext, fullName string, number int, login string) {
+	// Forget the prompt once consumed: the 👍 stays on the comment, and the
+	// poller would otherwise start the same fix on every scan.
+	app.Store.UpdateIssue(fullName, number, func(state *IssueState) {
+		state.ReviewCommentID = 0
+	})
 	key := fmt.Sprintf("%s#%d#reviewfix", fullName, number)
 	r.enqueue(fullName, key, stageWork, func(jobCtx context.Context) {
 		issue, err := app.GH.GetIssue(jobCtx, fullName, number)
@@ -768,6 +773,15 @@ func (r *Router) checkReactions(ctx context.Context, app *AppContext) {
 	}
 	for _, issue := range issues {
 		st := r.store.Issue(app.Repo.FullName, issue.Number)
+		// A reviewed PR is not in a task phase, and the reaction webhook is not
+		// always delivered, so check the review prompt on every scan.
+		if st.ReviewCommentID != 0 {
+			if login, ok := r.commentThumbsUp(ctx, app, st.ReviewCommentID); ok {
+				r.log.Info("review accepted by 👍 from @%s on %s#%d (poll)", login, app.Repo.FullName, issue.Number)
+				r.enqueueReviewFix(ctx, app, app.Repo.FullName, issue.Number, login)
+				continue
+			}
+		}
 		switch st.Phase {
 		case "awaiting_approval":
 			if login, ok := r.commentThumbsUp(ctx, app, st.PlanCommentID); ok {

@@ -169,7 +169,13 @@ Other rules:
   “apply this review”: the daemon rebuilds the instructions from the review body
   and its inline comments (`reviewInstructions`) and runs `doModifyPR` on the
   PR. This exists because GitHub has no reactions API for review bodies, so the
-  daemon posts a small follow-up comment that carries the thumbs-up.
+  daemon posts a small follow-up comment that carries the thumbs-up. The prompt
+  id is cleared when consumed, so the poller does not restart the fix on every
+  scan.
+- Reaction events are not always delivered, so `checkReactions` (30 s poller)
+  re-checks 👍 on the plan comment, the PR announcement and the review prompt;
+  reviewed PRs are not in a task phase, so the review check runs for any open
+  issue with a stored `ReviewCommentID`.
 
 ## 7. Job scheduler (`router.go`)
 
@@ -384,6 +390,7 @@ keeps tests quiet. Notable coverage:
 | `review_test.go` | review command parsing, `review.json` loading, inline filtering, fallback body, review API payload |
 | `modifypr_test.go` | which PR heads can be pushed (same repo, fork with allow-edits-by-maintainers) |
 | `messages_test.go` | scaffolding catalogs, `app.text` resolution, language detection |
+| `reactions_test.go` | polled 👍 on the review prompt (approver only, consumed once) |
 | `router_ci_test.go` | the CI queue does not block work; cancel stops CI jobs |
 | `gh_test.go` | label transitions and GitHub helpers |
 | `main_test.go` | proxy/env parsing, repo normalization, mentions and commands, closable phases |
