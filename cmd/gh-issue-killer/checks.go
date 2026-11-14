@@ -143,7 +143,7 @@ func runChecks(ctx context.Context, checks []CheckSpec, worktree, runDir string,
 
 // checksSummary is the compact form used in comments and PR bodies: a count
 // plus one short label per check, never the raw command with its run paths.
-func checksSummary(results []CheckResult) string {
+func checksSummary(lang string, results []CheckResult) string {
 	if len(results) == 0 {
 		return ""
 	}
@@ -153,9 +153,9 @@ func checksSummary(results []CheckResult) string {
 			failed++
 		}
 	}
-	head := fmt.Sprintf("✅ 检查通过（%d 项）", len(results))
+	head := scaffoldText(lang, "checks.pass", len(results))
 	if failed > 0 {
-		head = fmt.Sprintf("❌ 检查未通过（%d/%d 项）", failed, len(results))
+		head = scaffoldText(lang, "checks.fail", failed, len(results))
 	}
 	lines := []string{head}
 	for _, item := range results {

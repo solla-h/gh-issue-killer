@@ -232,17 +232,17 @@ func TestMissingHookEvents(t *testing.T) {
 }
 
 func TestChecksSummary(t *testing.T) {
-	got := checksSummary([]CheckResult{{Name: "go test", OK: true}, {Name: "lint", OK: true}})
+	got := checksSummary("zh", []CheckResult{{Name: "go test", OK: true}, {Name: "lint", OK: true}})
 	want := "✅ 检查通过（2 项）\n- ✅ go test\n- ✅ lint"
 	if got != want {
 		t.Fatalf("summary = %q, want %q", got, want)
 	}
-	got = checksSummary([]CheckResult{{Name: "go test", OK: true}, {Name: "lint", OK: false}})
+	got = checksSummary("zh", []CheckResult{{Name: "go test", OK: true}, {Name: "lint", OK: false}})
 	want = "❌ 检查未通过（1/2 项）\n- ✅ go test\n- ❌ lint"
 	if got != want {
 		t.Fatalf("summary = %q, want %q", got, want)
 	}
-	if got := checksSummary(nil); got != "" {
+	if got := checksSummary("zh", nil); got != "" {
 		t.Fatalf("empty summary = %q", got)
 	}
 	if got := checkLabel(CheckResult{Cmd: "node /tmp/run/verify.js verify"}); got != "node verify.js verify" {

@@ -100,6 +100,7 @@ Markdown prompts; `web` embeds `index.html` and `logo.svg`.
 | `proxy.go` | SOCKS5/HTTP proxies for HTTP clients, git and child processes |
 | `wizard.go` | `-init` interactive setup |
 | `web.go`, `web/` | loopback dashboard and its JSON API |
+| `messages.go` | scaffolding text (headings, hints, footers) in Chinese/English, `app.text`, language detection |
 | `util.go` | paths, logger, atomic writes, `tailString`, small helpers |
 | `prompts/*.md` | stage prompts (embedded via `prompts/embed.go`) |
 
@@ -382,6 +383,7 @@ keeps tests quiet. Notable coverage:
 | `cirepair_test.go` | worktree-ahead detection used to publish a stranded repair commit |
 | `review_test.go` | review command parsing, `review.json` loading, inline filtering, fallback body, review API payload |
 | `modifypr_test.go` | which PR heads can be pushed (same repo, fork with allow-edits-by-maintainers) |
+| `messages_test.go` | scaffolding catalogs, `app.text` resolution, language detection |
 | `router_ci_test.go` | the CI queue does not block work; cancel stops CI jobs |
 | `gh_test.go` | label transitions and GitHub helpers |
 | `main_test.go` | proxy/env parsing, repo normalization, mentions and commands, closable phases |
@@ -412,6 +414,10 @@ must stay clean; `gofmt -l .` must print nothing.
   the caller, or the agent sees the raw token.
 - Prompts are embedded (`prompts/embed.go`); a new file must match `*.md` and be
   added to `prompts_test.go` and to the doc.
+- User-facing scaffolding never hardcodes a language: every heading, hint and
+  footer goes through `app.text(number, "key")`, with the key present in both
+  `scaffoldZH` and `scaffoldEN` in `messages.go`. The language comes from
+  `replyLanguage` (explicit) or from the issue/PR text (`detectLanguage`).
 - GitHub check runs are not the same as workflow runs: check runs come from
   `/commits/{sha}/check-runs`, job logs from `/actions/jobs/{id}/logs` (the id
   is in the check run’s `details_url`).
@@ -438,6 +444,7 @@ must stay clean; `gofmt -l .` must print nothing.
 | worktree layout, branch naming, commit/push | §12 |
 | agent CLIs, sessions, timeouts | §13 |
 | a config key or default | §14 and DEPLOY.md §4.1 |
+| a user-facing comment string | §18 (goes through `app.text` and `messages.go`) |
 | web routes or API payloads | §15 |
 | reload/self-update behaviour | §16 |
 | new or renamed test files | §17 |

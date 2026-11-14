@@ -193,10 +193,11 @@ Optional: `pollIntervalSec` (30), `webhook` (true), `maxFixRounds` (3),
 `worktreeRoot` (state dir), `replyLanguage` (`auto`).
 
 `replyLanguage` controls the language the coding agent writes in — plans,
-summaries, PR bodies and review findings. The default `auto` follows the
-language of the issue or pull request. Set it to a language name or tag
-(`en`, `zh-CN`, `ja`, …) to force one; the daemon's own fixed comments stay in
-Chinese regardless.
+summaries, PR bodies and review findings — and the daemon's own scaffolding
+(headings, hints, merge prompts). The default `auto` follows the language of the
+issue or pull request. Set it to a language name or tag (`en`, `zh-CN`, `ja`, …)
+to force one. Scaffolding has Chinese and English catalogs; other languages fall
+back to English while the agent still writes in the chosen language.
 
 Per-repo overrides: the `repos` object form can set `codingAgent`, `model`,
 `approvers`, `worktreeRoot`, or `replyLanguage` for one repository.

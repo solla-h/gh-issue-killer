@@ -161,6 +161,23 @@ func (s *Store) UpdateIssue(fullName string, number int, fn func(*IssueState)) I
 	return *issue
 }
 
+// SetPRMeta stores the title and body of a pull request without putting it into
+// the task phase machine; the scaffolding language is detected from it.
+func (s *Store) SetPRMeta(fullName string, number int, meta *IssueMeta) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	repo := s.repoLocked(fullName)
+	key := itoa(number)
+	issue := repo.Issues[key]
+	if issue == nil {
+		issue = &IssueState{Phase: "", CreatedAt: nowISO()}
+		repo.Issues[key] = issue
+	}
+	issue.Issue = meta
+	issue.UpdatedAt = nowISO()
+	_ = s.SaveLocked()
+}
+
 func (s *Store) IsCommentProcessed(fullName string, number int, commentID int64) bool {
 	issue := s.Issue(fullName, number)
 	for _, id := range issue.ProcessedComments {

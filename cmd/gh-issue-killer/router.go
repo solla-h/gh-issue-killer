@@ -464,7 +464,7 @@ func (r *Router) enqueueReviewFix(ctx context.Context, app *AppContext, fullName
 			return
 		}
 		if strings.TrimSpace(instructions) == "" {
-			_, _ = app.GH.PostComment(jobCtx, fullName, number, "### 🤖 这条 review 没有需要修改的地方")
+			_, _ = app.GH.PostComment(jobCtx, fullName, number, app.text(number, "review.nothing"))
 			return
 		}
 		doModifyPR(jobCtx, app, Trigger{
@@ -891,7 +891,7 @@ func (r *Router) HandleTrigger(ctx context.Context, fullName string, trigger Tri
 				}
 				if issue.PullRequest == nil {
 					_, _ = app.GH.PostComment(jobCtx, fullName, trigger.IssueNumber,
-						fmt.Sprintf("`review` 只用于 pull request；要让 agent 实现这个 issue，直接 @%s 描述需求即可。", r.agentLogin))
+						fmt.Sprintf(app.text(trigger.IssueNumber, "router.review_not_pr"), r.agentLogin))
 					return
 				}
 				pr, err := app.GH.GetPR(jobCtx, fullName, trigger.IssueNumber)

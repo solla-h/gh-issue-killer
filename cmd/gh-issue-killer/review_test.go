@@ -91,7 +91,7 @@ func TestInlineReviewComments(t *testing.T) {
 
 func TestRenderReviewBody(t *testing.T) {
 	app := &AppContext{AgentLogin: "bot"}
-	body := renderReviewBody(app, reviewResult{
+	body := renderReviewBody(app, 5, reviewResult{
 		Verdict: "request_changes",
 		Summary: "This retry loop can spin forever.",
 	})
@@ -103,10 +103,11 @@ func TestRenderReviewBody(t *testing.T) {
 }
 
 func TestFindingsFallback(t *testing.T) {
-	if got := findingsFallback(nil); got != "" {
+	app := &AppContext{AgentLogin: "bot"}
+	if got := findingsFallback(app, 5, nil); got != "" {
 		t.Fatalf("fallback for no findings = %q", got)
 	}
-	got := findingsFallback([]reviewFinding{{Path: "a.py", Line: 7, Body: "line one\nline two"}})
+	got := findingsFallback(app, 5, []reviewFinding{{Path: "a.py", Line: 7, Body: "line one\nline two"}})
 	if !strings.Contains(got, "`a.py:7`") || strings.Contains(got, "\nline two") {
 		t.Fatalf("fallback = %q", got)
 	}

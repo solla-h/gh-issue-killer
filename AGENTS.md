@@ -48,8 +48,11 @@ A change that alters behaviour but leaves these files stale is incomplete.
 - `gofmt` formatting, tabs, `go vet` clean.
 - Comments explain *why* (trade-offs, GitHub quirks, race conditions), not
   *what*. Exported helpers get a one-line doc comment.
-- Keep error messages actionable; user-facing strings are Chinese in GitHub
-  comments (matching the existing stages) and English in code and logs.
+- Keep error messages actionable. GitHub comment scaffolding (headings, hints,
+  footers) never hardcodes a language: use `app.text(number, "key")` and add the
+  key to both `scaffoldZH` and `scaffoldEN` in `messages.go`. The language is
+  `replyLanguage`, falling back to the issue/PR text (`detectLanguage`). Code
+  and logs stay English.
 - Every new branch in the CI gate, command keyword, phase transition or
   scheduler rule needs a unit test next to the code (`newFakeAPI` for GitHub,
   `NewSilentLogger` to keep tests quiet).
