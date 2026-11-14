@@ -49,7 +49,8 @@ flowchart LR
 - **Checks and screenshots.** The coding agent writes the commands that prove
   its work (`checks.json`); the daemon runs them, gives the agent up to
   `maxFixRounds` repair rounds, and only then pushes. UI changes come with
-  before/after screenshots, tightly cropped and split by a visible divider.
+  before/after screenshots, tightly cropped and stacked above each other behind a
+divider so they stay readable on a phone.
 - **PR and merge.** The daemon opens the PR, annotates it with checks and
   screenshots, and starts watching CI immediately on its own queue — a slow or
   stuck check never occupies an implementation slot, so other issues keep

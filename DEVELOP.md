@@ -317,7 +317,7 @@ runs with its own timeout, output tail and exit code, collected into
 `tests`, `screenshots`, `prTitle`, `prBody`, `abort`).
 
 Screenshots are only expected for user-visible UI changes: the agent captures
-the changed region before/after, `shots.go` composes them side by side with a
+the changed region before/after, `shots.go` stacks them (before above after) with a
 divider, uploads through GitHub’s user-attachments endpoint, and the result is
 embedded in the PR and the comment. Backend/docs/test changes must not produce
 screenshots.
