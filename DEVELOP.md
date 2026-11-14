@@ -142,7 +142,7 @@ is re-read from the API before acting, and deliveries are de-duplicated.
 | input | command |
 | --- | --- |
 | `lgtm`, `continue`, `继续`, 👍 reaction on the plan/PR comment | approve / merge |
-| `合并`, `merge`, `ship` | merge |
+| `合并`, `merge`, `ship` | merge (the issue's PR, or a pull request the daemon does not own) |
 | `cancel`, `stop`, `停止` | cancel |
 | `review`, `review pr`, `cr`, `审查` (the target is a pull request) | review the PR and post a GitHub review |
 | `apply`, `apply review`, `应用` (the target is a pull request) | apply the latest bot review's findings without a new review |
@@ -234,6 +234,12 @@ instead. It then posts a “Review 已提交” comment and stores its id plus t
 review id in the PR's `IssueState`, so a 👍 on that comment applies the
 findings through `doModifyPR`. Nothing is ever pushed by the review itself and
 the worktree is removed afterwards.
+
+**Merge PR** (`doMergePR`) — lands a PR the daemon does not own: fetch the head
+into a branch worktree, resolve conflicts with `conflict_fix.md` (merge the base,
+agent resolves, checks run, push to the head repo), wait for GitHub checks and
+squash-merge. Uses `conflictTarget` so the same resolution code works for issue
+worktrees (push to the base repo) and fork PRs (push to the fork).
 
 **Modify PR** (`doModifyPR`) — applies an approver's instruction to a PR the
 daemon does not own. It fetches the PR head into a branch worktree, runs the

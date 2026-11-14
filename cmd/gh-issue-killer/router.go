@@ -885,6 +885,29 @@ func (r *Router) HandleTrigger(ctx context.Context, fullName string, trigger Tri
 			return
 		}
 
+		// A merge command on a pull request the daemon does not own lands it
+		// directly: resolve conflicts, run the checks and squash-merge.
+		if command == "merge" {
+			mergeKey := fmt.Sprintf("%s#%d#mergepr", fullName, trigger.IssueNumber)
+			r.enqueue(fullName, mergeKey, stageWork, func(jobCtx context.Context) {
+				issue, err := app.GH.GetIssue(jobCtx, fullName, trigger.IssueNumber)
+				if err != nil || issue.State != "open" {
+					return
+				}
+				if issue.PullRequest == nil {
+					app.Log.Info("merge command on %s#%d which is not a pull request", fullName, trigger.IssueNumber)
+					return
+				}
+				pr, err := app.GH.GetPR(jobCtx, fullName, trigger.IssueNumber)
+				if err != nil {
+					app.Log.Warn("merge PR %s#%d: %v", fullName, trigger.IssueNumber, err)
+					return
+				}
+				doMergePR(jobCtx, app, trigger, pr)
+			})
+			return
+		}
+
 		if command == "approve" && (st.Phase == "awaiting_approval" || st.Phase == "blocked") {
 			app.GH.SetAgentState(ctx, fullName, trigger.IssueNumber, workingLabel)
 			r.enqueue(fullName, key, stageWork, func(jobCtx context.Context) {

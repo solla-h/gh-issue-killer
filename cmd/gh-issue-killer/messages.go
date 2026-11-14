@@ -62,10 +62,11 @@ var scaffoldZH = map[string]string{
 	"merge.failed.title": "### 🤖 合并失败",
 	"merge.failed.hint":  "回复 **合并** 重试。",
 
-	"merge.done.title":  "### 🤖 已完成",
-	"merge.done.pr":     "- PR #%d 已 squash merge 到 `%s`",
-	"merge.done.branch": "- 分支 `%s` 已删除，worktree 已清理",
-	"merge.done.footer": "本 issue 由自动化流程关闭。",
+	"merge.pr.done_title": "### 🤖 已合并",
+	"merge.done.title":    "### 🤖 已完成",
+	"merge.done.pr":       "- PR #%d 已 squash merge 到 `%s`",
+	"merge.done.branch":   "- 分支 `%s` 已删除，worktree 已清理",
+	"merge.done.footer":   "本 issue 由自动化流程关闭。",
 
 	"conflict.title":        "### 🤖 PR 有冲突，正在自动解决（第 %d/%d 轮）",
 	"conflict.hint":         "把 `%s` 合进 `%s`、解决冲突并跑完检查，通过后直接合并，不需要你操作。",
@@ -153,10 +154,11 @@ var scaffoldEN = map[string]string{
 	"merge.failed.title": "### 🤖 Merge failed",
 	"merge.failed.hint":  "Reply **merge** to retry.",
 
-	"merge.done.title":  "### 🤖 Done",
-	"merge.done.pr":     "- PR #%d was squash-merged into `%s`",
-	"merge.done.branch": "- branch `%s` deleted, worktree removed",
-	"merge.done.footer": "This issue was closed by the automation.",
+	"merge.pr.done_title": "### 🤖 Merged",
+	"merge.done.title":    "### 🤖 Done",
+	"merge.done.pr":       "- PR #%d was squash-merged into `%s`",
+	"merge.done.branch":   "- branch `%s` deleted, worktree removed",
+	"merge.done.footer":   "This issue was closed by the automation.",
 
 	"conflict.title":        "### 🤖 PR has conflicts, resolving automatically (round %d/%d)",
 	"conflict.hint":         "Merging `%s` into `%s`, resolving the conflicts and running the checks; it merges automatically once green.",

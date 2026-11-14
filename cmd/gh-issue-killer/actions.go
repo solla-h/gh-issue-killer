@@ -1004,6 +1004,119 @@ func doModifyPR(ctx context.Context, app *AppContext, trigger Trigger, pr PullRe
 	app.Log.Info("pr modified for %s#%d (%s)", app.Repo.FullName, number, pr.Head.Repo.FullName)
 }
 
+// doMergePR lands a pull request the daemon does not own: resolve conflicts,
+// run the checks, gate on CI and squash-merge. It needs maintainer_can_modify
+// for forks, because the resolution is pushed back to the head branch.
+func doMergePR(ctx context.Context, app *AppContext, trigger Trigger, pr PullRequest) {
+	number := pr.Number
+	rememberPRMeta(app, pr)
+	app.Log.Info("pr merge start for %s#%d", app.Repo.FullName, number)
+	react(ctx, app, trigger, "hooray")
+	if !canPushToPR(app, pr) {
+		_, _ = app.GH.PostComment(ctx, app.Repo.FullName, number, strings.Join([]string{
+			app.text(number, "modify.cannot.title"),
+			"",
+			fmt.Sprintf(app.text(number, "modify.cannot.body"), firstNonEmpty(pr.Head.Repo.FullName, "(deleted fork)")),
+			"",
+			app.text(number, "modify.cannot.hint"),
+		}, "\n"))
+		return
+	}
+	if err := fetchBase(ctx, app.Local); err != nil {
+		postReviewFailure(ctx, app, number, fmt.Errorf("fetch %s: %w", app.Local.Base, err))
+		return
+	}
+	ref, err := fetchPullRequestHead(ctx, app.Local, number)
+	if err != nil {
+		postReviewFailure(ctx, app, number, fmt.Errorf("fetch PR head: %w", err))
+		return
+	}
+	runDir := runDirForPR(app, number)
+	branch := fmt.Sprintf("pr-%d-%s", number, shortID(fmt.Sprintf("%d", time.Now().UnixNano())))
+	worktree, err := createWorktreeFromRef(ctx, app.Local, branch, ref)
+	if err != nil {
+		postReviewFailure(ctx, app, number, fmt.Errorf("worktree: %w", err))
+		return
+	}
+	defer func() {
+		removeWorktree(ctx, app.Local, worktree, true)
+		deleteLocalBranch(ctx, app.Local, branch)
+	}()
+	target := conflictTarget{
+		Number:       number,
+		Worktree:     worktree,
+		LocalBranch:  branch,
+		RemoteURL:    prPushURL(app, pr),
+		RemoteBranch: pr.Head.Ref,
+		RunDir:       runDir,
+	}
+	rounds := 0
+	for {
+		pr, err = waitForMergeable(ctx, app, number, time.Minute)
+		if err != nil {
+			postReviewFailure(ctx, app, number, fmt.Errorf("refresh PR: %w", err))
+			return
+		}
+		if pr.State != "open" {
+			return
+		}
+		if mergeBlockedByConflicts(pr) {
+			if rounds >= app.Cfg.MaxFixRounds {
+				reason := fmt.Sprintf(app.text(number, "conflict.blocked"), app.Local.Base, rounds)
+				_, _ = app.GH.PostComment(ctx, app.Repo.FullName, number,
+					fmt.Sprintf("%s\n\n%s\n\n%s", app.text(number, "merge.failed.title"), reason, app.text(number, "conflict.blocked_hint")))
+				return
+			}
+			rounds++
+			_, _ = app.GH.PostComment(ctx, app.Repo.FullName, number, strings.Join([]string{
+				fmt.Sprintf(app.text(number, "conflict.title"), rounds, app.Cfg.MaxFixRounds),
+				"",
+				fmt.Sprintf(app.text(number, "conflict.hint"), app.Local.Base, pr.Head.Ref),
+			}, "\n"))
+			if err := resolveConflictsIn(ctx, app, target, rounds); err != nil {
+				postReviewFailure(ctx, app, number, err)
+				return
+			}
+			continue
+		}
+		if verdict := waitForChecks(ctx, app, pr.Head.SHA, pr.Base.Ref, 10*time.Minute); !verdict.OK {
+			_, _ = app.GH.PostComment(ctx, app.Repo.FullName, number,
+				fmt.Sprintf("%s\n\n%s\n\n- %s\n\n%s", app.text(number, "ci.blocked.title"),
+					app.text(number, "ci.blocked.body"), verdict.Note, app.text(number, "ci.blocked.hint")))
+			return
+		}
+		merged, mergeErr := app.GH.MergePR(ctx, app.Repo.FullName, number)
+		if mergeErr == nil && merged.Merged {
+			if strings.EqualFold(pr.Head.Repo.FullName, app.Repo.FullName) {
+				_ = app.GH.DeleteBranch(ctx, app.Repo.FullName, pr.Head.Ref)
+			}
+			_, _ = app.GH.PostComment(ctx, app.Repo.FullName, number, strings.Join([]string{
+				app.text(number, "merge.pr.done_title"),
+				"",
+				fmt.Sprintf(app.text(number, "merge.done.pr"), number, pr.Base.Ref),
+			}, "\n"))
+			app.Log.Info("merged PR %s#%d", app.Repo.FullName, number)
+			return
+		}
+		if isConflictError(mergeErr) && rounds < app.Cfg.MaxFixRounds {
+			// The base moved between the gate and the merge: resolve again.
+			rounds++
+			if err := resolveConflictsIn(ctx, app, target, rounds); err != nil {
+				postReviewFailure(ctx, app, number, err)
+				return
+			}
+			continue
+		}
+		detail := merged.Message
+		if mergeErr != nil {
+			detail = mergeErr.Error()
+		}
+		_, _ = app.GH.PostComment(ctx, app.Repo.FullName, number,
+			fmt.Sprintf("%s\n\n```\n%s\n```\n\n%s", app.text(number, "merge.failed.title"), sanitize(detail), app.text(number, "merge.failed.hint")))
+		return
+	}
+}
+
 func doImplement(ctx context.Context, app *AppContext, trigger Trigger, issue Issue, st IssueState) {
 	number := issue.Number
 	if issueCancelled(app, number) {
@@ -1857,9 +1970,48 @@ func waitForPRHead(ctx context.Context, app *AppContext, number int, sha string,
 
 // resolveConflicts merges the base branch into the PR worktree, lets the agent
 // resolve the markers, runs the checks and pushes the result.
+// conflictTarget is where a conflict resolution happens and where the merged
+// result is pushed. It covers both the daemon's own issue worktrees (push to
+// the base repository) and pull requests from forks (push to the fork).
+type conflictTarget struct {
+	Number          int
+	PRNumber        int
+	PRURL           string
+	Worktree        string
+	LocalBranch     string
+	RemoteURL       string
+	RemoteBranch    string
+	RunDir          string
+	SessionID       string
+	RecordChecks    bool
+	Cancelled       func() bool
+	RememberSession func(string)
+}
+
 func resolveConflicts(ctx context.Context, app *AppContext, issue Issue, st IssueState, round int) error {
-	number := issue.Number
-	worktree := st.Worktree
+	return resolveConflictsIn(ctx, app, conflictTarget{
+		Number:       issue.Number,
+		PRNumber:     st.PRNumber,
+		PRURL:        st.PRURL,
+		Worktree:     st.Worktree,
+		LocalBranch:  st.Branch,
+		RemoteURL:    app.Local.HTTPSURL,
+		RemoteBranch: st.Branch,
+		RunDir:       runDirFor(app, issue.Number),
+		SessionID:    st.SessionID,
+		RecordChecks: true,
+		Cancelled:    func() bool { return issueCancelled(app, issue.Number) },
+		RememberSession: func(sessionID string) {
+			app.Store.UpdateIssue(app.Repo.FullName, issue.Number, func(state *IssueState) {
+				state.SessionID = sessionID
+			})
+		},
+	}, round)
+}
+
+func resolveConflictsIn(ctx context.Context, app *AppContext, target conflictTarget, round int) error {
+	worktree := target.Worktree
+	number := target.Number
 	if _, err := os.Stat(filepath.Join(worktree, ".git")); err != nil {
 		return fmt.Errorf("worktree %s is gone: %w", worktree, err)
 	}
@@ -1875,19 +2027,19 @@ func resolveConflicts(ctx context.Context, app *AppContext, issue Issue, st Issu
 		return fmt.Errorf("git merge %s: %s", app.Local.Base, tailString(merge.Stderr, 10))
 	}
 
-	runDir := runDirFor(app, number)
+	runDir := target.RunDir
 	runner, err := newCodingRunner(app.Repo.CodingAgent)
 	if err != nil {
 		return err
 	}
-	sessionID := st.SessionID
+	sessionID := target.SessionID
 	if len(files) > 0 {
 		app.Log.Info("resolving %d conflicted file(s) for %s#%d", len(files), app.Repo.FullName, number)
 		prompt, promptErr := renderPrompt("conflict_fix", map[string]string{
 			"REPO":     app.Repo.FullName,
 			"BASE":     app.Local.Base,
 			"NUMBER":   itoa(number),
-			"PR":       fmt.Sprintf("#%d %s", st.PRNumber, st.PRURL),
+			"PR":       fmt.Sprintf("#%d %s", target.PRNumber, target.PRURL),
 			"WORKTREE": worktree,
 			"RUN_DIR":  runDir,
 			"FILES":    "- " + strings.Join(files, "\n- "),
@@ -1911,30 +2063,30 @@ func resolveConflicts(ctx context.Context, app *AppContext, issue Issue, st Issu
 			return fmt.Errorf("conflict agent: %w", runErr)
 		}
 		sessionID = firstNonEmpty(result.SessionID, sessionID)
-		if sessionID != "" {
-			app.Store.UpdateIssue(app.Repo.FullName, number, func(state *IssueState) {
-				state.SessionID = sessionID
-			})
+		if sessionID != "" && target.RememberSession != nil {
+			target.RememberSession(sessionID)
 		}
 		if remaining := conflictedFiles(ctx, worktree, app.Env); len(remaining) > 0 {
 			return fmt.Errorf("conflicts remain after the agent: %s", strings.Join(remaining, ", "))
 		}
-		if issueCancelled(app, number) {
+		if target.Cancelled != nil && target.Cancelled() {
 			return nil
 		}
 	}
 
 	checkResults, ok := runChecksWithFixes(ctx, app, runner, sessionID, worktree, runDir)
-	app.Store.UpdateIssue(app.Repo.FullName, number, func(state *IssueState) {
-		state.Checks = checkResults
-	})
+	if target.RecordChecks {
+		app.Store.UpdateIssue(app.Repo.FullName, number, func(state *IssueState) {
+			state.Checks = checkResults
+		})
+	}
 	if !ok {
 		return fmt.Errorf("checks failed after resolving conflicts with %s", app.Local.Base)
 	}
 	if err := commitAll(ctx, worktree, app.Env, fmt.Sprintf("chore: resolve conflicts with %s for #%d", app.Local.Base, number)); err != nil {
 		return fmt.Errorf("commit conflict resolution: %w", err)
 	}
-	if err := pushBranch(ctx, worktree, app.Local, st.Branch); err != nil {
+	if err := pushBranchTo(ctx, worktree, target.RemoteURL, app.Env, target.LocalBranch, target.RemoteBranch); err != nil {
 		return fmt.Errorf("push conflict resolution: %w", err)
 	}
 	return nil
