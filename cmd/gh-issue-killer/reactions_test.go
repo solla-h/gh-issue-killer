@@ -23,7 +23,8 @@ func TestCheckReactionsAppliesReviewThumbOnce(t *testing.T) {
 	gh, _ := newFakeAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/repos/acme/app/issues":
-			_ = json.NewEncoder(w).Encode([]map[string]any{{"number": 5, "state": "open"}})
+			// pull_request marks it as a PR: the reaction scan must not filter it.
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"number": 5, "state": "open", "pull_request": map[string]any{}}})
 		case strings.HasSuffix(r.URL.Path, "/issues/comments/77/reactions"):
 			_ = json.NewEncoder(w).Encode([]map[string]any{
 				{"content": "+1", "user": map[string]string{"login": "owner"}},
@@ -63,7 +64,8 @@ func TestCheckReactionsIgnoresNonApprover(t *testing.T) {
 	gh, _ := newFakeAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/repos/acme/app/issues":
-			_ = json.NewEncoder(w).Encode([]map[string]any{{"number": 5, "state": "open"}})
+			// pull_request marks it as a PR: the reaction scan must not filter it.
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"number": 5, "state": "open", "pull_request": map[string]any{}}})
 		case strings.HasSuffix(r.URL.Path, "/issues/comments/77/reactions"):
 			_ = json.NewEncoder(w).Encode([]map[string]any{
 				{"content": "+1", "user": map[string]string{"login": "random"}},

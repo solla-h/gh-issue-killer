@@ -376,6 +376,22 @@ func (g *GH) ListOpenIssues(ctx context.Context, fullName string, since *time.Ti
 }
 
 func (g *GH) ListIssues(ctx context.Context, fullName, state string, since *time.Time) ([]Issue, error) {
+	all, err := g.ListIssuesAndPRs(ctx, fullName, state, since)
+	if err != nil {
+		return nil, err
+	}
+	filtered := all[:0]
+	for _, issue := range all {
+		if issue.PullRequest == nil {
+			filtered = append(filtered, issue)
+		}
+	}
+	return filtered, nil
+}
+
+// ListIssuesAndPRs is the raw issue listing: the endpoint returns pull requests
+// too, which flows that track a PR directly (review prompts) need.
+func (g *GH) ListIssuesAndPRs(ctx context.Context, fullName, state string, since *time.Time) ([]Issue, error) {
 	var all []Issue
 	for page := 1; page <= 10; page++ {
 		path := fmt.Sprintf("/repos/%s/issues?state=%s&per_page=100&sort=updated&direction=desc&page=%d", fullName, url.QueryEscape(state), page)
@@ -391,13 +407,7 @@ func (g *GH) ListIssues(ctx context.Context, fullName, state string, since *time
 			break
 		}
 	}
-	filtered := all[:0]
-	for _, issue := range all {
-		if issue.PullRequest == nil {
-			filtered = append(filtered, issue)
-		}
-	}
-	return filtered, nil
+	return all, nil
 }
 
 func (g *GH) ListComments(ctx context.Context, fullName string, number int) ([]Comment, error) {

@@ -766,7 +766,9 @@ func (r *Router) checkPRFeedback(ctx context.Context, app *AppContext) {
 }
 
 func (r *Router) checkReactions(ctx context.Context, app *AppContext) {
-	issues, err := app.GH.ListIssues(ctx, app.Repo.FullName, "open", nil)
+	// Pull requests are included: a review prompt is addressed to the PR, not to
+	// an issue, and the plain ListIssues filter would hide it.
+	issues, err := app.GH.ListIssuesAndPRs(ctx, app.Repo.FullName, "open", nil)
 	if err != nil {
 		r.log.Debug("scan awaiting issues: %v", err)
 		return
