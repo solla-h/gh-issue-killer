@@ -54,8 +54,14 @@ resumes it.
 - **One static binary.** Outbound HTTPS only; at runtime it needs `git`, one
   coding-agent CLI and `/bin/sh`.
 
-Set `webPort` for the live dashboard: per-repo queues, stage progress, PRs,
-checks and screenshots.
+Set `webPort` for the live dashboard: per-repo queues and parallel meters (the
+PLAN/WORK limits apply per project), stage progress, PRs, checks, screenshots
+and the daemon log, with plans rendered as markdown. The board follows the
+system theme or can be pinned to light/dark, the interface switches between
+Chinese and English and links back to this repository, tasks can be filtered by
+project or free text or hide finished/cancelled work, the console colours the
+log by level, and the header counts the tasks waiting for you (approval, merge
+or unblock).
 
 ## Install with a coding agent
 
