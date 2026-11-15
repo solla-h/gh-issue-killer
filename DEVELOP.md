@@ -167,6 +167,9 @@ Other rules:
   `maintainer_can_modify`, otherwise the daemon replies instead of failing.
 - A non-command comment that mentions the agent, an inline review comment or a
   review body on an open PR becomes `doRevise` (feedback on the same branch).
+- An `edited` issue comment is reprocessed only when its new body mentions the
+  agent (`Trigger.Reprocess`), so adding the mention after the fact still
+  reaches the daemon; other edits stay silent.
 - Closing an issue cancels the task and closes the PR; reopening resumes. A
   reopened `done` issue starts from `new`.
 - 👍 on the stored `PRCommentID` merges, but only while phase is `pr_open`.
@@ -421,6 +424,7 @@ keeps tests quiet. Notable coverage:
 | `cirepair_test.go` | worktree-ahead detection used to publish a stranded repair commit |
 | `review_test.go` | review command parsing, `review.json` loading, inline filtering, fallback body, review API payload |
 | `modifypr_test.go` | which PR heads can be pushed (same repo, fork with allow-edits-by-maintainers) |
+| `comment_edit_test.go` | edited comments are reprocessed, plain repeats stay deduped |
 | `messages_test.go` | scaffolding catalogs, `app.text` resolution, language detection |
 | `reactions_test.go` | polled 👍 on the review prompt (approver only, consumed once) |
 | `blocked_ci_test.go` | green-check detection, auto-resume of CI-blocked tasks, other reasons untouched |

@@ -220,7 +220,13 @@ func dispatchSmee(ctx context.Context, app *AppContext, router *Router, envelope
 			log.Warn("smee: fetch comment %d: %v", payload.Comment.ID, err)
 			return
 		}
-		if payload.Action != "" && payload.Action != "created" {
+		edited := payload.Action == "edited"
+		if payload.Action != "" && payload.Action != "created" && !edited {
+			return
+		}
+		// An edit that adds (or fixes) the mention must be handled, but only
+		// when the comment actually addresses the agent. Other edits stay silent.
+		if edited && !isMention(comment.Body, app.AgentLogin) {
 			return
 		}
 		if issue, issueErr := app.GH.GetIssue(ctx, app.Repo.FullName, payload.Issue.Number); issueErr == nil && issue.State != "open" {
@@ -235,6 +241,7 @@ func dispatchSmee(ctx context.Context, app *AppContext, router *Router, envelope
 			Sender:      comment.User.Login,
 			Key:         "smee-" + firstNonEmpty(envelope.Delivery, fmt.Sprint(comment.ID)),
 			DeliveryID:  envelope.Delivery,
+			Reprocess:   edited,
 		})
 		return
 	}

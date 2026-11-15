@@ -43,6 +43,9 @@ type Trigger struct {
 	Sender      string
 	Key         string
 	DeliveryID  string
+	// Reprocess allows an edited comment that already ran to run again, so
+	// adding the mention after the fact still reaches the agent.
+	Reprocess bool
 }
 
 var secretPatterns = []*regexp.Regexp{

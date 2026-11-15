@@ -781,6 +781,12 @@ func (r *Router) enqueueMerge(app *AppContext, fullName string, number int, send
 	})
 }
 
+// shouldSkipComment de-duplicates comment deliveries, except when the event is
+// an edit that must be reconsidered.
+func (r *Router) shouldSkipComment(fullName string, trigger Trigger) bool {
+	return !trigger.Reprocess && r.store.IsCommentProcessed(fullName, trigger.IssueNumber, trigger.CommentID)
+}
+
 // commentThumbsUp returns an approver who reacted 👍 to the comment.
 func (r *Router) commentThumbsUp(ctx context.Context, app *AppContext, commentID int64) (string, bool) {
 	if commentID == 0 {
@@ -908,7 +914,7 @@ func (r *Router) HandleTrigger(ctx context.Context, fullName string, trigger Tri
 	}
 
 	if trigger.Type == "comment" {
-		if r.store.IsCommentProcessed(fullName, trigger.IssueNumber, trigger.CommentID) {
+		if r.shouldSkipComment(fullName, trigger) {
 			r.log.Debug("skip processed comment %d", trigger.CommentID)
 			return
 		}
