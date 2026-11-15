@@ -92,7 +92,9 @@ Only the daemon writes `state.json`; the web UI and CLIs read it. Treat
    in one repository does not delay the others. The SSE stream is recycled every
    `smeeRecycle` (30 min) because an idle connection can die silently and then
    every webhook is missed while the poller carries the load.
-10. `SIGINT`/`SIGTERM` → wait for `router.Idle()` → shut down → `reexec` for
+10. `startReleaseChecker`: one more goroutine per repo with `release.enabled`,
+    checking at startup and hourly (the config interval throttles the API calls).
+11. `SIGINT`/`SIGTERM` → wait for `router.Idle()` → shut down → `reexec` for
     config reloads and self-updates (pid is kept, so the lock stays valid).
 
 **Setup mode.** `-embedded` with a missing or invalid config does not exit and
@@ -123,11 +125,12 @@ dependencies.
 | `router.go` | event handling, commands, state machine, job scheduler (`plan`/`work`/`ci` queues), startup scan |
 | `actions.go` | the stages: plan, implement, revise, CI settle, merge, and their helpers |
 | `checks.go` | `checks.json` detection/loading/execution and the summary line |
-| `gh.go` | GitHub REST client: issues, comments, PRs, labels, reviews, check runs, workflow runs/jobs, hooks, asset uploads |
+| `gh.go` | GitHub REST client: issues, comments, PRs, labels, reviews, check runs, workflow runs/jobs, hooks, tags, commits, releases, asset uploads |
 | `git.go` | managed clone, worktrees, commit/push, diff/stat, env |
 | `runner.go` | coding-agent registry (`opencode`, `claude`, `codex`) and process/JSON output handling |
 | `state.go` | `Store`, `IssueState`, `RepoState`, atomic persistence |
 | `watcher.go`, `watch.go` | config reload (fsnotify + digest polling) |
+| `release.go` | opt-in periodic releases: version tag parsing, commit classification, bumping and publishing |
 | `selfupdate.go` | release asset selection, checksum verification, binary replacement, 30 min polling |
 | `logs.go` | rotating log file, `-logs` follower |
 | `shots.go` | screenshot collection, before/after composition, upload |
@@ -238,6 +241,14 @@ Rules that keep it safe:
   worktree. Two agents never edit one worktree at the same time.
 - The CI queue exists so a slow gate never occupies the implementation slot;
   the coding stage only enqueues and returns.
+
+**Release schedule** (`release.go`) is not a queue: every repo with
+`release.enabled` gets one goroutine started from `main.go`. It checks at
+startup and then every `releaseTick` (one hour); `release.intervalDays` decides
+whether that tick may call GitHub, and `RepoMeta.LastReleaseCheckAt` records a
+successful check (including “no commits”), so a failed request retries on the
+next tick instead of waiting a whole interval. Publishing never enqueues a job
+and never touches an issue worktree.
 
 ## 8. Stages (`actions.go`)
 
@@ -376,7 +387,11 @@ screenshots.
 `NewGH` builds an `http.Client` with the configured proxy, reads the `gh-agent`
 token (never the human’s), and exposes typed helpers for the REST endpoints the
 daemon needs. Retries: 429/5xx ×3 with backoff; other 4xx return `*APIError`
-(use `isStatus`). Logging of every request is DEBUG level.
+(use `isStatus`). Logging of every request is DEBUG level. The release checker
+reads tags (`/repos/{repo}/tags`), compares a tag with the default branch
+(`/repos/{repo}/compare/{base}...{head}`) or lists the branch’s commits when
+there is no tag yet, and publishes with `POST /repos/{repo}/releases`
+(`tag_name`, `name`, `body`, `target_commitish`, never a draft).
 
 Hooks are created per repo (`hookEvents`): `issues`, `issue_comment`,
 `reaction`, `pull_request_review`, `pull_request_review_comment`. When webhooks
@@ -413,7 +428,17 @@ false, `updateProxy` empty (direct downloads only; a wrong or unreachable
 mirror is ignored), `worktreeRoot` = state dir, `language` `auto` (the coding
 agent writes in the issue's or PR's language; a language tag forces one and is
 passed to the prompts as `{{LANGUAGE}}`). `repos` also accepts an object for
-per-repo `codingAgent`/`model`/`approvers`/`worktreeRoot`/`language`.
+per-repo `codingAgent`/`model`/`approvers`/`worktreeRoot`/`language`/`release`.
+
+`release` is an optional per-repo block — `enabled` (false), `intervalDays` (1),
+`bugBump` (`patch`) and `featureBump` (`minor`); a bump accepts `patch`, `minor`
+or `major` and anything else fails `loadConfig`. The newest `vMAJOR.MINOR.PATCH`
+tag is the version source; a repo without one publishes `v0.1.0` first (the
+bump settings only apply afterwards). `release.go` bumps `featureBump` when the
+batch contains a `feat`/`feature` commit subject and `bugBump` otherwise.
+Publishing creates the tag and the release in one call
+(`target_commitish` = default branch), so the token needs `contents: write`,
+which the push-capable gh-agent token already has.
 
 A valid `config.json` save triggers a graceful re-exec: jobs finish, state is
 saved, `syscall.Exec` replaces the process (same pid). Under `-embedded` the
@@ -507,6 +532,7 @@ keeps tests quiet. Notable coverage:
 | `blocked_ci_test.go` | green-check detection, auto-resume of CI-blocked tasks, other reasons untouched |
 | `router_ci_test.go` | the CI queue does not block work; cancel stops CI jobs |
 | `gh_test.go` | label transitions and GitHub helpers |
+| `release_test.go` | version tag parsing, bump rules, commit classification, due check, release request body, disabled/not-due/no-commit skips |
 | `main_test.go` | proxy/env parsing, repo normalization, mentions and commands, closable phases |
 | `prompts_test.go` | every embedded prompt loads and keeps its placeholders |
 | `runner_test.go` | per-agent argv construction |
@@ -572,6 +598,7 @@ must stay clean; `gofmt -l .` must print nothing.
 | worktree layout, branch naming, commit/push | §12 |
 | agent CLIs, sessions, timeouts | §13 |
 | a config key or default | §14 and DEPLOY.md §4.1 |
+| the periodic release checker, version bumps, release notes | §7, §14 and §17 |
 | a user-facing comment string | §18 (goes through `app.text` and `messages.go`) |
 | web routes or API payloads | §15 |
 | reload/self-update behaviour | §16 |

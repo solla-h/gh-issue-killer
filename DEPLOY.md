@@ -240,13 +240,57 @@ to force one. Scaffolding has Chinese and English catalogs; other languages fall
 back to English while the agent still writes in the chosen language.
 
 Per-repo overrides: the `repos` object form can set `codingAgent`, `model`,
-`approvers`, `worktreeRoot`, or `language` for one repository.
+`approvers`, `worktreeRoot`, `language`, or a `release` block for one
+repository.
 
 The running daemon watches the config file with the OS notification API
 (inotify / kqueue via fsnotify, debounced, with a 30 s safety poll). A valid save
 triggers a graceful re-exec: it waits for running jobs, then replaces itself
 with the new config, keeping the PID and the lock. An invalid save is logged
 and ignored, so the old settings stay active.
+
+### 4.1.1 Periodic releases (optional, per repo)
+
+```json
+{
+  "repos": {
+    "me/app": {
+      "release": {
+        "enabled": true,
+        "intervalDays": 1,
+        "bugBump": "patch",
+        "featureBump": "minor"
+      }
+    }
+  }
+}
+```
+
+| key | default | meaning |
+| --- | --- | --- |
+| `enabled` | `false` | publish releases for this repository |
+| `intervalDays` | `1` | minimum days between checks |
+| `bugBump` | `patch` | part to bump when the batch has no `feat` commit |
+| `featureBump` | `minor` | part to bump when it has one |
+
+`bugBump`/`featureBump` accept `patch`, `minor` or `major`; any other value is a
+config error. The newest `vMAJOR.MINOR.PATCH` tag is the version source. A
+repository without a version tag publishes `v0.1.0` as its first release — the
+bump settings describe a change relative to a published version, so they only
+apply afterwards. A check lists the commits on the default branch since that
+tag, bumps `featureBump` when any subject starts with `feat`/`feature`
+(conventional commits, including `feat(scope):`) and `bugBump` otherwise, then
+creates the tag and the release on the default branch. The release body lists
+those commit subjects and a compare link.
+
+Checks run at startup and then hourly, but at most once per `intervalDays`. A
+check with no new commits records the timestamp and publishes nothing; a failed
+request is logged and retried on the next tick without moving the timestamp.
+`-once` does not run release checks. This is opt-in because it creates public
+tags and releases: the first run of a repository covers every commit since its
+newest version tag, or the whole history when there is none, and publishes
+`v0.1.0`. The token needs `contents: write`, which a push-capable gh-agent
+token already has.
 
 ### 4.2 Coding agents
 
@@ -329,6 +373,8 @@ macOS: start it once after login, or add it to login items. Nothing else.
 | self-update | with `"selfUpdate": true`, poll `releases/latest` every 30 min, verify `checksums.txt`, replace the binary and re-exec (no Go toolchain needed) |
 | install a release now | dashboard → 设置 → 检查更新 → 立即升级, or download the archive and replace the binary |
 | update behind the GFW | set `"updateProxy": "gh-proxy.com"`; release downloads fall back to it |
+| release check | `grep 'release' "$LOG"`; a due check publishes a tag + release, a failure logs `release check:` and retries next hour |
+| bump the next release | edit `release.bugBump` / `release.featureBump` and save; the version itself comes from the newest `v*` tag |
 | smoke test | `gh-issue-killer -config "$CONFIG" -once` |
 | full loop with the human's `gh` | `scripts/smoke-test.sh <owner/repo>` |
 
@@ -373,6 +419,7 @@ Interrupted implementations resume from their worktree on the next start.
 | `already running (pid N)` | use `-status` / `-stop`; never start a second instance |
 | desktop window says the engine exited | read `~/.gh-issue-killer/logs/desktop-engine.log`; the usual cause is a daemon (or a second desktop) already holding `daemon.lock` |
 | update fails with `checksum mismatch` | do not bypass it; the release asset or the mirror is corrupt. Retry, or install the archive by hand after `sha256sum -c` |
+| `release check:` warning repeats | check the token's `contents: write` and that `v*` tags are not protected; the next hourly tick retries without moving the timestamp |
 
 ## 9. Invariants — NEVER
 

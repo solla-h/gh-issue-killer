@@ -39,6 +39,17 @@ type RepoConfig struct {
 	Approvers    []string
 	WorktreeRoot string
 	Language     string
+	Release      ReleaseConfig
+}
+
+// ReleaseConfig is the opt-in periodic release for one repository. Publishing
+// creates a public tag and release, so disabled is the default. BugBump and
+// FeatureBump name the version part to increment: patch, minor or major.
+type ReleaseConfig struct {
+	Enabled      bool
+	IntervalDays int
+	BugBump      string
+	FeatureBump  string
 }
 
 type Config struct {
@@ -64,12 +75,22 @@ type Config struct {
 }
 
 type repoOptions struct {
-	Repo         string   `json:"repo"`
-	CodingAgent  string   `json:"codingAgent"`
-	Model        string   `json:"model"`
-	Approvers    []string `json:"approvers"`
-	WorktreeRoot string   `json:"worktreeRoot"`
-	Language     string   `json:"language"`
+	Repo         string         `json:"repo"`
+	CodingAgent  string         `json:"codingAgent"`
+	Model        string         `json:"model"`
+	Approvers    []string       `json:"approvers"`
+	WorktreeRoot string         `json:"worktreeRoot"`
+	Language     string         `json:"language"`
+	Release      releaseOptions `json:"release"`
+}
+
+// releaseOptions mirrors ReleaseConfig in the config file. intervalDays is a
+// minimum gap between checks: the tick itself is hourly.
+type releaseOptions struct {
+	Enabled      bool   `json:"enabled"`
+	IntervalDays int    `json:"intervalDays"`
+	BugBump      string `json:"bugBump"`
+	FeatureBump  string `json:"featureBump"`
 }
 
 type rawConfig struct {
@@ -171,6 +192,10 @@ func normalizeRepos(raw json.RawMessage, defaults repoOptions) ([]RepoConfig, er
 		if len(approvers) == 0 {
 			approvers = []string{parts[0]}
 		}
+		release, err := normalizeRelease(entry.Release)
+		if err != nil {
+			return nil, fmt.Errorf("repo %s: %w", fullName, err)
+		}
 		repos = append(repos, RepoConfig{
 			FullName:     fullName,
 			Owner:        parts[0],
@@ -180,9 +205,37 @@ func normalizeRepos(raw json.RawMessage, defaults repoOptions) ([]RepoConfig, er
 			Approvers:    approvers,
 			WorktreeRoot: firstNonEmpty(expandHome(entry.WorktreeRoot), defaults.WorktreeRoot),
 			Language:     firstNonEmpty(entry.Language, defaults.Language, "auto"),
+			Release:      release,
 		})
 	}
 	return repos, nil
+}
+
+// normalizeRelease validates the optional per-repo release block and fills in
+// the defaults: one day between checks, patch for a bug and minor for a feature.
+func normalizeRelease(opts releaseOptions) (ReleaseConfig, error) {
+	cfg := ReleaseConfig{
+		Enabled:      opts.Enabled,
+		IntervalDays: opts.IntervalDays,
+		BugBump:      bumpPatch,
+		FeatureBump:  bumpMinor,
+	}
+	if cfg.IntervalDays < 1 {
+		cfg.IntervalDays = 1
+	}
+	if raw := strings.ToLower(strings.TrimSpace(opts.BugBump)); raw != "" {
+		if !isBumpPart(raw) {
+			return cfg, fmt.Errorf("invalid release.bugBump %q (supported: %s)", opts.BugBump, bumpPartList())
+		}
+		cfg.BugBump = raw
+	}
+	if raw := strings.ToLower(strings.TrimSpace(opts.FeatureBump)); raw != "" {
+		if !isBumpPart(raw) {
+			return cfg, fmt.Errorf("invalid release.featureBump %q (supported: %s)", opts.FeatureBump, bumpPartList())
+		}
+		cfg.FeatureBump = raw
+	}
+	return cfg, nil
 }
 
 func sortRepoOptions(entries []repoOptions) {
