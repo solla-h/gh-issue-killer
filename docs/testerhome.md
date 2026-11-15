@@ -99,7 +99,8 @@ go build -o bin/gh-issue-killer ./cmd/gh-issue-killer
   刻意留的刹车。
 - **它需要一个独立的 bot 账号。** token 只给 bot，approver 是人；daemon 不会去用
   你本机的 `gh auth token`。
-- **只支持 macOS 和 Linux**，单用户单实例运行，一个 state 目录对应一个 daemon。
+- **单用户单实例运行**，一个 state 目录对应一个 daemon。macOS、Linux、Windows 都能跑；
+  Windows 上也可以直接用桌面版，不用开 daemon，关窗即停。
 - **语言跟随 issue。** 计划、总结、PR body 用 issue 或 PR 的语言写；daemon 自己的
   标题、提示这类脚手架文案目前有中英文两套。
 
