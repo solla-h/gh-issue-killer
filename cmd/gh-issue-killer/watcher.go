@@ -12,6 +12,10 @@ import (
 	"time"
 )
 
+// smeeRecycle reopens the SSE stream periodically so a silently dead
+// connection cannot swallow webhooks indefinitely.
+const smeeRecycle = 30 * time.Minute
+
 func missingHookEvents(have []string) []string {
 	seen := map[string]bool{}
 	for _, event := range have {
@@ -275,15 +279,33 @@ func startSmee(ctx context.Context, app *AppContext, router *Router, channel str
 				return
 			default:
 			}
-			if err := consumeSmee(ctx, app, router, client, channel, log, stop); err != nil {
+			// Recycle the stream periodically: an idle SSE connection can die
+			// silently (half-open TCP) and then every webhook is missed while the
+			// poller carries the load. Reconnecting keeps delivery reliable.
+			streamCtx, cancelStream := context.WithCancel(ctx)
+			timer := time.AfterFunc(smeeRecycle, cancelStream)
+			err := consumeSmee(streamCtx, app, router, client, channel, log, stop)
+			timer.Stop()
+			cancelStream()
+			if ctx.Err() != nil {
+				return
+			}
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if err != nil {
 				log.Warn("smee stream for %s ended: %v; reconnecting in 5s", app.Repo.FullName, err)
-				select {
-				case <-stop:
-					return
-				case <-ctx.Done():
-					return
-				case <-time.After(5 * time.Second):
-				}
+			} else {
+				log.Debug("smee stream for %s recycled; reconnecting", app.Repo.FullName)
+			}
+			select {
+			case <-stop:
+				return
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
 			}
 		}
 	}()
@@ -351,24 +373,32 @@ func consumeSmee(ctx context.Context, app *AppContext, router *Router, client *h
 }
 
 func startPoller(ctx context.Context, cfg *Config, router *Router, contexts map[string]*AppContext, log *Logger) func() {
-	ticker := time.NewTicker(cfg.PollInterval)
 	stop := make(chan struct{})
-	go func() {
-		for {
-			select {
-			case <-stop:
-				ticker.Stop()
-				return
-			case <-ctx.Done():
-				ticker.Stop()
-				return
-			case <-ticker.C:
-				for fullName := range contexts {
-					router.PollOnce(ctx, fullName)
+	var wg sync.WaitGroup
+	// One poller per repository: a slow or stalled API call in one repo must
+	// not delay the others. Before this, the repositories shared one ticker and
+	// a single hung request pushed every repo's next poll minutes out.
+	for fullName := range contexts {
+		wg.Add(1)
+		go func(name string) {
+			defer wg.Done()
+			ticker := time.NewTicker(cfg.PollInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stop:
+					return
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					router.PollOnce(ctx, name)
 				}
 			}
-		}
-	}()
-	log.Info("poller started, interval %s", cfg.PollInterval)
-	return func() { close(stop) }
+		}(fullName)
+	}
+	log.Info("poller started per repo, interval %s", cfg.PollInterval)
+	return func() {
+		close(stop)
+		wg.Wait()
+	}
 }

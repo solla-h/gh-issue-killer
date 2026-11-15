@@ -260,7 +260,10 @@ func tokenFromCLI(configDir string) (string, error) {
 }
 
 func NewGH(proxy *Proxy, log *Logger) (*GH, error) {
-	return NewGHWithTimeout(proxy, log, 120*time.Second)
+	// GitHub answers in well under a second; a long timeout only lets one
+	// stalled connection block a poll cycle. The retry loop in do() still gives
+	// transient failures a few chances.
+	return NewGHWithTimeout(proxy, log, 30*time.Second)
 }
 
 func NewGHWithTimeout(proxy *Proxy, log *Logger, timeout time.Duration) (*GH, error) {

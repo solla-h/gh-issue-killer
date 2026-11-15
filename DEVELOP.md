@@ -73,7 +73,11 @@ Only the daemon writes `state.json`; the web UI and CLIs read it. Treat
    and picks up issues that already mention the agent.
 8. `watchConfig` (fsnotify + debounce + 30 s safety poll) and, when
    `selfUpdate` is on, `watchSelfUpdates`.
-9. Smee webhook per repo (`ensureSmeeHook`) plus `startPoller`.
+9. Smee webhook per repo (`ensureSmeeHook`) plus one poller goroutine per
+   repository. Each repo has its own 30 s ticker, so a slow or stalled API call
+   in one repository does not delay the others. The SSE stream is recycled every
+   `smeeRecycle` (30 min) because an idle connection can die silently and then
+   every webhook is missed while the poller carries the load.
 10. `SIGINT`/`SIGTERM` → wait for `router.Idle()` → shut down → `reexec` for
     config reloads and self-updates (pid is kept, so the lock stays valid).
 
