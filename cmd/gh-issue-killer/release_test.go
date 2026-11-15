@@ -119,8 +119,14 @@ func TestNextReleaseVersion(t *testing.T) {
 		t.Fatalf("custom feature bump = %+v", got)
 	}
 	empty := ReleaseConfig{}
-	if got := nextReleaseVersion(releaseVersion{}, []string{"fix: a"}, empty); got != (releaseVersion{0, 0, 1}) {
+	if got := nextReleaseVersion(current, []string{"fix: a"}, empty); got != (releaseVersion{1, 2, 4}) {
 		t.Fatalf("zero config must default to patch, got %+v", got)
+	}
+}
+
+func TestInitialRelease(t *testing.T) {
+	if got := initialRelease.String(); got != "v0.1.0" {
+		t.Fatalf("initialRelease = %q, want v0.1.0", got)
 	}
 }
 
@@ -243,7 +249,7 @@ func TestCheckReleaseBumpsPatchForFixes(t *testing.T) {
 	}
 }
 
-func TestCheckReleaseStartsFromZeroWithoutTag(t *testing.T) {
+func TestCheckReleaseFirstReleaseIsZeroOneZero(t *testing.T) {
 	gh, calls := newFakeAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/repos/acme/app/tags":
@@ -252,8 +258,10 @@ func TestCheckReleaseStartsFromZeroWithoutTag(t *testing.T) {
 			if r.URL.Query().Get("sha") != "main" {
 				t.Errorf("commits sha = %q, want main", r.URL.Query().Get("sha"))
 			}
+			// Fix commits only: the first release must still be v0.1.0, not
+			// v0.0.1, because there is no published version to patch.
 			_ = json.NewEncoder(w).Encode([]map[string]any{
-				{"sha": "abcdef1234567890", "commit": map[string]string{"message": "feat: the first feature"}},
+				{"sha": "abcdef1234567890", "commit": map[string]string{"message": "fix: the first change"}},
 			})
 		case r.URL.Path == "/repos/acme/app/releases":
 			w.WriteHeader(http.StatusCreated)

@@ -433,11 +433,12 @@ per-repo `codingAgent`/`model`/`approvers`/`worktreeRoot`/`language`/`release`.
 `release` is an optional per-repo block — `enabled` (false), `intervalDays` (1),
 `bugBump` (`patch`) and `featureBump` (`minor`); a bump accepts `patch`, `minor`
 or `major` and anything else fails `loadConfig`. The newest `vMAJOR.MINOR.PATCH`
-tag is the version source, a repo without one starts at `v0.0.0`, and
-`release.go` bumps `featureBump` when the batch contains a `feat`/`feature`
-commit subject and `bugBump` otherwise. Publishing creates the tag and the
-release in one call (`target_commitish` = default branch), so the token needs
-`contents: write`, which the push-capable gh-agent token already has.
+tag is the version source; a repo without one publishes `v0.1.0` first (the
+bump settings only apply afterwards). `release.go` bumps `featureBump` when the
+batch contains a `feat`/`feature` commit subject and `bugBump` otherwise.
+Publishing creates the tag and the release in one call
+(`target_commitish` = default branch), so the token needs `contents: write`,
+which the push-capable gh-agent token already has.
 
 A valid `config.json` save triggers a graceful re-exec: jobs finish, state is
 saved, `syscall.Exec` replaces the process (same pid). Under `-embedded` the

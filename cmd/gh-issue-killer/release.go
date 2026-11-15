@@ -10,9 +10,10 @@ import (
 
 // Periodic release publishing. A repository opts in with release.enabled; the
 // daemon then checks the default branch at most once per intervalDays and
-// publishes a GitHub release when it moved past the newest v* tag. Everything
-// here is deliberately small: the tag is the only version source, and the
-// conventional-commit subject decides whether the batch is a feature.
+// publishes a GitHub release when it moved past the newest v* tag, or v0.1.0
+// when the repository has no version tag yet. Everything here is deliberately
+// small: the tag is the only version source, and the conventional-commit
+// subject decides whether the batch is a feature.
 
 const (
 	// releaseTick re-evaluates each repo's schedule; the config interval decides
@@ -46,8 +47,8 @@ func (v releaseVersion) String() string {
 }
 
 // latestVersionTag returns the highest v* tag. Non-version tags are ignored so
-// a repository's own labels cannot disturb the sequence, and a repository
-// without any version tag starts from v0.0.0.
+// a repository's own labels cannot disturb the sequence. A repository without
+// any version tag returns ok=false; checkRelease then publishes initialRelease.
 func latestVersionTag(tags []Tag) (releaseVersion, string, bool) {
 	best := ""
 	for _, tag := range tags {
@@ -116,6 +117,12 @@ func classifyCommit(title string) string {
 	}
 	return commitFix
 }
+
+// initialRelease is the first version of a repository that has no version tag
+// yet. It is always v0.1.0: a bump describes a change relative to a published
+// version, and a first v0.0.1 would read as a patch to a release that never
+// happened, whatever the commit mix contains.
+var initialRelease = releaseVersion{Minor: 1}
 
 // nextReleaseVersion bumps the feature part when the batch contains a feature
 // commit, otherwise the configured bug part.
@@ -228,7 +235,10 @@ func checkRelease(ctx context.Context, app *AppContext) error {
 	for _, commit := range commits {
 		titles = append(titles, commitTitle(commit))
 	}
-	next := nextReleaseVersion(current, titles, cfg)
+	next := initialRelease
+	if tagged {
+		next = nextReleaseVersion(current, titles, cfg)
+	}
 	notes := releaseNotes(app.Repo.FullName, previous, next, commits)
 	if _, err := app.GH.CreateRelease(ctx, app.Repo.FullName, next.String(), next.String(), notes, base); err != nil {
 		return fmt.Errorf("create release %s: %w", next, err)

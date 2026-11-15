@@ -274,20 +274,23 @@ and ignored, so the old settings stay active.
 | `featureBump` | `minor` | part to bump when it has one |
 
 `bugBump`/`featureBump` accept `patch`, `minor` or `major`; any other value is a
-config error. The newest `vMAJOR.MINOR.PATCH` tag is the version source, and a
-repository without one starts at `v0.0.0`. A check lists the commits on the
-default branch since that tag, bumps `featureBump` when any subject starts with
-`feat`/`feature` (conventional commits, including `feat(scope):`) and `bugBump`
-otherwise, then creates the tag and the release on the default branch. The
-release body lists those commit subjects and a compare link.
+config error. The newest `vMAJOR.MINOR.PATCH` tag is the version source. A
+repository without a version tag publishes `v0.1.0` as its first release — the
+bump settings describe a change relative to a published version, so they only
+apply afterwards. A check lists the commits on the default branch since that
+tag, bumps `featureBump` when any subject starts with `feat`/`feature`
+(conventional commits, including `feat(scope):`) and `bugBump` otherwise, then
+creates the tag and the release on the default branch. The release body lists
+those commit subjects and a compare link.
 
 Checks run at startup and then hourly, but at most once per `intervalDays`. A
 check with no new commits records the timestamp and publishes nothing; a failed
 request is logged and retried on the next tick without moving the timestamp.
 `-once` does not run release checks. This is opt-in because it creates public
 tags and releases: the first run of a repository covers every commit since its
-newest version tag, or the whole history when there is none. The token needs
-`contents: write`, which a push-capable gh-agent token already has.
+newest version tag, or the whole history when there is none, and publishes
+`v0.1.0`. The token needs `contents: write`, which a push-capable gh-agent
+token already has.
 
 ### 4.2 Coding agents
 
