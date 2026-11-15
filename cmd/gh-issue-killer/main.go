@@ -481,6 +481,7 @@ func main() {
 		stops = append(stops, startSmee(ctx, app, router, channel, log))
 	}
 	stops = append(stops, startPoller(ctx, cfg, router, contexts, log))
+	stops = append(stops, startReleaseChecker(ctx, contexts, log))
 
 	stopSignals := make(chan os.Signal, 1)
 	signal.Notify(stopSignals, syscall.SIGINT, syscall.SIGTERM)

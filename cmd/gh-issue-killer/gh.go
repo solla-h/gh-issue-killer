@@ -671,6 +671,79 @@ func (g *GH) DeleteBranch(ctx context.Context, fullName, branch string) error {
 	return g.do(ctx, http.MethodDelete, fmt.Sprintf("/repos/%s/git/refs/heads/%s", fullName, branch), nil, nil)
 }
 
+type Tag struct {
+	Name   string `json:"name"`
+	Commit struct {
+		SHA string `json:"sha"`
+	} `json:"commit"`
+}
+
+type Commit struct {
+	SHA    string `json:"sha"`
+	Commit struct {
+		Message string `json:"message"`
+	} `json:"commit"`
+}
+
+// Release is a published GitHub release. Creating it with a target commitish
+// also creates the tag, so one call publishes both.
+type Release struct {
+	ID      int64  `json:"id"`
+	TagName string `json:"tag_name"`
+	HTMLURL string `json:"html_url"`
+}
+
+// ListTags reads the repository's tags, newest first. The release checker only
+// looks at the names; a tag list is enough to find the last version.
+func (g *GH) ListTags(ctx context.Context, fullName string) ([]Tag, error) {
+	var tags []Tag
+	err := g.do(ctx, http.MethodGet, "/repos/"+fullName+"/tags?per_page=100", nil, &tags)
+	return tags, err
+}
+
+// ListCommits returns the newest commits on a branch. It is the fallback for a
+// repository that has no version tag yet and therefore nothing to compare to.
+func (g *GH) ListCommits(ctx context.Context, fullName, branch string, limit int) ([]Commit, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	var commits []Commit
+	path := fmt.Sprintf("/repos/%s/commits?sha=%s&per_page=%d", fullName, url.QueryEscape(branch), limit)
+	err := g.do(ctx, http.MethodGet, path, nil, &commits)
+	return commits, err
+}
+
+// CompareCommits lists the commits between base and head, which is the release
+// batch after the newest version tag.
+func (g *GH) CompareCommits(ctx context.Context, fullName, base, head string) ([]Commit, error) {
+	var payload struct {
+		Commits []Commit `json:"commits"`
+	}
+	path := fmt.Sprintf("/repos/%s/compare/%s...%s?per_page=100", fullName, url.PathEscape(base), url.PathEscape(head))
+	if err := g.do(ctx, http.MethodGet, path, nil, &payload); err != nil {
+		return nil, err
+	}
+	return payload.Commits, nil
+}
+
+// CreateRelease publishes a release for tag. target is the commit-ish the new
+// tag points at (the default branch); an empty target lets GitHub choose.
+func (g *GH) CreateRelease(ctx context.Context, fullName, tag, name, body, target string) (Release, error) {
+	payload := map[string]any{
+		"tag_name":   tag,
+		"name":       name,
+		"body":       body,
+		"draft":      false,
+		"prerelease": false,
+	}
+	if target != "" {
+		payload["target_commitish"] = target
+	}
+	var release Release
+	err := g.do(ctx, http.MethodPost, "/repos/"+fullName+"/releases", payload, &release)
+	return release, err
+}
+
 func (g *GH) ListCheckRuns(ctx context.Context, fullName, sha string) (CheckRuns, error) {
 	var runs CheckRuns
 	err := g.do(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/commits/%s/check-runs?per_page=100", fullName, sha), nil, &runs)

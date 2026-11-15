@@ -343,6 +343,39 @@ func TestLoadConfigParallelKeys(t *testing.T) {
 	}
 }
 
+func TestLoadConfigRelease(t *testing.T) {
+	body := `{"repos":{"me/app":{"release":{"enabled":true,"intervalDays":3,"bugBump":"MINOR","featureBump":"major"}},"me/plain":{}}}`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Repos) != 2 {
+		t.Fatalf("repos = %+v", cfg.Repos)
+	}
+	// The object form is sorted by repo name.
+	want := ReleaseConfig{Enabled: true, IntervalDays: 3, BugBump: "minor", FeatureBump: "major"}
+	if cfg.Repos[0].Release != want {
+		t.Fatalf("release = %+v, want %+v", cfg.Repos[0].Release, want)
+	}
+	defaults := ReleaseConfig{Enabled: false, IntervalDays: 1, BugBump: "patch", FeatureBump: "minor"}
+	if cfg.Repos[1].Release != defaults {
+		t.Fatalf("default release = %+v, want %+v", cfg.Repos[1].Release, defaults)
+	}
+
+	invalid := `{"repos":{"me/app":{"release":{"enabled":true,"bugBump":"hotfix"}}}}`
+	if err := os.WriteFile(path, []byte(invalid), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), "release.bugBump") {
+		t.Fatalf("invalid bump error = %v", err)
+	}
+}
+
 func TestIssueByPRAndFeedback(t *testing.T) {
 	old := stateDirOverride
 	stateDirOverride = t.TempDir()

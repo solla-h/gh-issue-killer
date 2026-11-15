@@ -51,6 +51,10 @@ resumes it.
 - **Multi-repo, no cross-blocking.** Each repository has its own agent, model,
   approvers and queues, and CI runs on a separate queue, so one slow repo never
   blocks another.
+- **Optional scheduled releases.** A repository can opt into publishing GitHub
+  releases after its default branch moves: a `feat:` commit bumps the second
+  version number, any other commit the third, checked once a day (or every few
+  days). Off by default and configured per repository.
 - **One static binary.** Outbound HTTPS only; at runtime it needs `git`, one
   coding-agent CLI and a shell (`/bin/sh`, `cmd` on Windows). Releases ship
   macOS, Linux and Windows builds.
@@ -150,7 +154,8 @@ comment**. Approval words, status labels and review rules live in
 
 `-init` writes the config for you; a hand-written JSON uses the same `repos` /
 `codingAgent` / `approvers` / `proxy` keys. Full reference (`language`,
-`webPort`, `updateProxy`, per-repo overrides, live reload):
+`webPort`, `updateProxy`, per-repo overrides including the opt-in `release`
+schedule, live reload):
 [DEPLOY.md](DEPLOY.md#41-configuration-reference). With `selfUpdate` on, the
 daemon installs new releases itself (checksums verified, `updateProxy` mirror
 when github.com is unreachable); the dashboard can also check and install on

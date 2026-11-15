@@ -42,6 +42,9 @@ flowchart LR
   任何被监听仓库的 PR 都能交给它。
 - **多仓库、互不阻塞。** 每个仓库有自己的 agent、model、approvers 和队列，
   一个慢仓库堵不住别的。
+- **可选定时发版。** 仓库可以开启自动发版：默认分支有新提交时，`feat:` 提交升
+  第二位版本号、其余提交升第三位，按每天或每隔几天检查一次。默认关闭，按项目
+  单独配置。
 - **单个静态二进制。** 只发起出站 HTTPS，运行时只需要 `git`、一个编码 agent
   CLI 和一个 shell（`/bin/sh`，Windows 上是 `cmd`）。发布产物覆盖 macOS、
   Linux 和 Windows。
@@ -129,8 +132,9 @@ go build -o bin/gh-issue-killer ./cmd/gh-issue-killer
 ```
 
 `-init` 会写好配置；手写就是同样的 `repos` / `codingAgent` / `approvers` /
-`proxy` 字段。完整配置项（`language`、`webPort`、`updateProxy`、每仓库覆盖、
-保存即重载）见 [DEPLOY.md](DEPLOY.md#41-configuration-reference)。打开
+`proxy` 字段。完整配置项（`language`、`webPort`、`updateProxy`、每仓库覆盖
+（含可选的定时发版）、保存即重载）见
+[DEPLOY.md](DEPLOY.md#41-configuration-reference)。打开
 `selfUpdate` 后 daemon 会自己安装新版本（校验 checksums，直连失败时走
 `updateProxy` 镜像）；也可以在看板里手动检查并升级。
 

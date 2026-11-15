@@ -67,6 +67,7 @@ type IssueState struct {
 
 type RepoMeta struct {
 	LastPollAt          string   `json:"lastPollAt,omitempty"`
+	LastReleaseCheckAt  string   `json:"lastReleaseCheckAt,omitempty"`
 	ProcessedDeliveries []string `json:"processedDeliveries,omitempty"`
 	SmeeChannel         string   `json:"smeeChannel,omitempty"`
 	HookID              int64    `json:"hookId,omitempty"`
