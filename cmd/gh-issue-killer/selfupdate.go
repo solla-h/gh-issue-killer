@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -474,6 +475,197 @@ func replaceBinary(exe, staged string) error {
 		return fmt.Errorf("replace %s: %w", exe, err)
 	}
 	_ = os.Remove(old)
+	return nil
+}
+
+const (
+	masterRepoURL = "https://github.com/uiautodev/gh-issue-killer.git"
+	masterBranch  = "master"
+	// masterCheck is fast on purpose: on a development machine a push to master
+	// should reach the running daemon in under a minute, not half an hour.
+	masterCheck = 30 * time.Second
+	// masterSettle waits for a burst of pushes to finish so the rebuild targets
+	// the final head instead of an intermediate commit.
+	masterSettle = 5 * time.Second
+)
+
+// watchMaster rebuilds the running binary from master whenever it moves. It is
+// the development counterpart of watchSelfUpdates and needs git, go and npm on
+// the machine, because the dashboard is compiled from frontend/ into the binary.
+// The returned channel fires once after a successful rebuild; the caller waits
+// for idle jobs and re-execs.
+func watchMaster(ctx context.Context, log *Logger, env []string) <-chan struct{} {
+	ready := make(chan struct{}, 1)
+	go func() {
+		head := remoteMasterHead(ctx, env)
+		if head == "" {
+			log.Warn("master update: cannot read %s from %s; disabled", masterBranch, masterRepoURL)
+			return
+		}
+		last := head
+		log.Debug("master update: watching %s at %s", masterBranch, shortSHA(head))
+		ticker := time.NewTicker(masterCheck)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			next := remoteMasterHead(ctx, env)
+			if next == "" || next == last {
+				continue
+			}
+			time.Sleep(masterSettle)
+			if settled := remoteMasterHead(ctx, env); settled != "" {
+				next = settled
+			}
+			log.Info("master update: new %s commit %s; rebuilding", masterBranch, shortSHA(next))
+			if err := rebuildFromMaster(ctx, log, env, next); err != nil {
+				log.Error("master update: %v (keeping the running binary)", err)
+				last = next
+				continue
+			}
+			last = next
+			select {
+			case ready <- struct{}{}:
+			default:
+			}
+			return
+		}
+	}()
+	return ready
+}
+
+func remoteMasterHead(ctx context.Context, env []string) string {
+	git, err := gitBinary()
+	if err != nil {
+		return ""
+	}
+	result, err := runCmd(ctx, git, []string{"ls-remote", masterRepoURL, "refs/heads/" + masterBranch}, CmdOptions{
+		Env:          env,
+		Timeout:      30 * time.Second,
+		AllowFailure: true,
+	})
+	if err != nil || result.Code != 0 {
+		return ""
+	}
+	return headFromLSRemote(result.Stdout)
+}
+
+func headFromLSRemote(out string) string {
+	fields := strings.Fields(out)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
+}
+
+// rebuildFromMaster builds the latest master in a dedicated clone and replaces
+// the running executable. The build goes to a temporary file first, so a failed
+// build never replaces a working binary.
+func rebuildFromMaster(ctx context.Context, log *Logger, env []string, head string) error {
+	git, err := gitBinary()
+	if err != nil {
+		return err
+	}
+	goBin, err := exec.LookPath("go")
+	if err != nil {
+		return fmt.Errorf("go not found in PATH: %w", err)
+	}
+	npmBin, err := exec.LookPath("npm")
+	if err != nil {
+		return fmt.Errorf("npm not found in PATH: %w", err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if resolved, resolveErr := filepath.EvalSymlinks(exe); resolveErr == nil {
+		exe = resolved
+	}
+	dir := filepath.Join(stateDir(), "self")
+	if !fileExists(filepath.Join(dir, "go.mod")) {
+		_ = os.RemoveAll(dir)
+		log.Info("master update: cloning %s into %s", masterRepoURL, dir)
+		if _, err := runCmd(ctx, git, []string{"clone", "--depth", "1", "--branch", masterBranch, masterRepoURL, dir}, CmdOptions{
+			Env:     env,
+			Timeout: 10 * time.Minute,
+		}); err != nil {
+			return fmt.Errorf("clone: %w", err)
+		}
+	}
+	if _, err := runCmd(ctx, git, []string{"-C", dir, "fetch", "--depth", "1", "origin",
+		"+refs/heads/" + masterBranch + ":refs/remotes/origin/" + masterBranch}, CmdOptions{
+		Env:     env,
+		Timeout: 5 * time.Minute,
+	}); err != nil {
+		return fmt.Errorf("fetch: %w", err)
+	}
+	if _, err := runCmd(ctx, git, []string{"-C", dir, "reset", "--hard", "origin/" + masterBranch}, CmdOptions{
+		Env:     env,
+		Timeout: time.Minute,
+	}); err != nil {
+		return fmt.Errorf("checkout: %w", err)
+	}
+	if err := buildDashboard(ctx, log, npmBin, dir, env); err != nil {
+		return err
+	}
+
+	tmp := exe + ".new"
+	if _, err := runCmd(ctx, goBin, []string{"build", "-trimpath",
+		"-ldflags", "-X main.commit=" + head,
+		"-o", tmp, "./cmd/gh-issue-killer"}, CmdOptions{
+		Cwd:     dir,
+		Env:     env,
+		Timeout: 10 * time.Minute,
+	}); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("go build: %w", err)
+	}
+	if err := os.Chmod(tmp, 0o755); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, exe); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("replace %s: %w", exe, err)
+	}
+	log.Info("master update: rebuilt %s at %s", exe, shortSHA(head))
+	return nil
+}
+
+// buildDashboard compiles frontend/ into cmd/gh-issue-killer/web/dist, which the
+// binary embeds. `npm ci` is skipped when the lockfile did not change.
+func buildDashboard(ctx context.Context, log *Logger, npmBin, dir string, env []string) error {
+	frontend := filepath.Join(dir, "frontend")
+	lock, err := os.ReadFile(filepath.Join(frontend, "package-lock.json"))
+	if err != nil {
+		return nil // dashboard build not part of this tree
+	}
+	sum := sha256.Sum256(lock)
+	stamp := hex.EncodeToString(sum[:])
+	stampFile := filepath.Join(frontend, "node_modules", ".ghik-lock")
+	if current, readErr := os.ReadFile(stampFile); readErr != nil || string(current) != stamp {
+		log.Info("master update: installing dashboard dependencies")
+		if _, err := runCmd(ctx, npmBin, []string{"ci", "--no-audit", "--no-fund"}, CmdOptions{
+			Cwd:     frontend,
+			Env:     env,
+			Timeout: 10 * time.Minute,
+		}); err != nil {
+			return fmt.Errorf("npm ci: %w", err)
+		}
+		if err := os.WriteFile(stampFile, []byte(stamp), 0o644); err != nil {
+			return nil
+		}
+	}
+	if _, err := runCmd(ctx, npmBin, []string{"run", "build"}, CmdOptions{
+		Cwd:     frontend,
+		Env:     env,
+		Timeout: 10 * time.Minute,
+	}); err != nil {
+		return fmt.Errorf("npm run build: %w", err)
+	}
 	return nil
 }
 

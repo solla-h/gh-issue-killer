@@ -567,7 +567,11 @@ opens by itself and the save button starts the real engine.
 ## 16. Reload and self-update
 
 `watchConfig` watches the config file with fsnotify plus a 30 s digest safety
-poll and a 500 ms debounce; invalid edits are ignored with a warning. The
+poll and a 500 ms debounce; invalid edits are ignored with a warning.
+`watchMaster` (`followMaster: true`) is the development counterpart of release
+updates: it polls `master` every 30 s, rebuilds in a dedicated clone under
+`$STATE/self` (frontend build included, `npm ci` only when the lockfile moves)
+and fires a restart; it takes precedence over `selfUpdate`. The
 dashboard's PUT reuses the same loader and triggers the same reload, as do
 `/api/restart` and a finished update. Both end in `reexec`, so the pid and the
 lock stay valid; interrupted implementations resume from their worktree on the

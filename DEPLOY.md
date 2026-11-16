@@ -238,7 +238,7 @@ Non-zero exit or missing lines → see failures.
 
 Optional: `pollIntervalSec` (30), `webhook` (true), `maxFixRounds` (3),
 `planParallel` (5) and `implementParallel` (1), both **per repository**,
-`selfUpdate` (false), `updateProxy` (empty = direct only), `webPort` (0 = off;
+`selfUpdate` (false), `followMaster` (false), `updateProxy` (empty = direct only), `webPort` (0 = off;
 `8787` serves the dashboard on 127.0.0.1), `planTimeoutMin` (15),
 `implementTimeoutMin` (60), `worktreeRoot` (state dir), `language` (`auto`).
 
@@ -438,6 +438,7 @@ macOS: start it once after login, or add it to login items. Nothing else.
 | stop | `gh-issue-killer -config "$CONFIG" -stop` |
 | apply a config change | save the file; the daemon reloads in place when jobs finish (same PID) |
 | self-update | with `"selfUpdate": true`, poll `releases/latest` every 30 min, verify `checksums.txt`, replace the binary and re-exec (no Go toolchain needed) |
+| follow master | with `"followMaster": true`, poll `master` every 30 s and rebuild the binary from source (`git`, `go` and `npm` on PATH; the dashboard is rebuilt too), then re-exec. Takes precedence over `selfUpdate`. For development machines: a push reaches the daemon in about a minute. |
 | install a release now | dashboard → 设置 → 检查更新 → 立即升级, or download the archive and replace the binary |
 | update behind the GFW | set `"updateProxy": "gh-proxy.com"`; release downloads fall back to it |
 | release check | `grep 'release' "$LOG"`; a due check publishes a tag + release, a failure logs `release check:` and retries next hour |

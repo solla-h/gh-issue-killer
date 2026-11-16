@@ -458,7 +458,18 @@ func main() {
 
 	reload := watchConfig(ctx, cfg.File, log, configWatchEvery, configDebounce)
 	var selfRestart <-chan struct{}
-	if cfg.SelfUpdate {
+	var masterRestart <-chan struct{}
+	if cfg.FollowMaster {
+		env := os.Environ()
+		for _, app := range contexts {
+			env = app.Env
+			break
+		}
+		masterRestart = watchMaster(ctx, log, env)
+		if cfg.SelfUpdate {
+			log.Warn("config: followMaster is on; release installs are skipped while following master")
+		}
+	} else if cfg.SelfUpdate {
 		selfRestart = watchSelfUpdates(ctx, log, cfg)
 	}
 
@@ -505,6 +516,9 @@ func main() {
 	case <-selfRestart:
 		reloadRequested = true
 		log.Info("self-update: restarting on the updated binary; waiting for running jobs to finish")
+	case <-masterRestart:
+		reloadRequested = true
+		log.Info("master update: restarting on the rebuilt binary; waiting for running jobs to finish")
 	}
 
 	if reloadRequested {
