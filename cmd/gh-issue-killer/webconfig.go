@@ -122,6 +122,7 @@ func (w *webServer) configDefaults() map[string]any {
 		"implementTimeoutMin": int(cfg.ImplementTimeout / time.Minute),
 		"webPort":             cfg.WebPort,
 		"selfUpdate":          cfg.SelfUpdate,
+		"followMaster":        cfg.FollowMaster,
 		"language":            cfg.Language,
 		// The dashboard renders one release row per repo, so it needs the
 		// per-repo defaults even when config.json has no repos entry yet.
@@ -227,6 +228,11 @@ func normalizeConfigDocument(doc map[string]any, file string) error {
 			return errors.New("webPort must be an integer between 0 and 65535")
 		}
 		doc["webPort"] = port
+	}
+	if value, ok := doc["followMaster"]; ok {
+		if _, isBool := value.(bool); !isBool {
+			return errors.New("followMaster must be a boolean")
+		}
 	}
 	if err := normalizeReleaseDocument(doc); err != nil {
 		return err

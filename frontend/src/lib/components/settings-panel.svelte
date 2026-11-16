@@ -53,7 +53,7 @@
 
 	let repoText = $state('');
 	let rows = $state<ReleaseRow[]>([]);
-	let form = $state({ agent: 'opencode', model: '', proxy: '', webPort: '0', updateProxy: '', selfUpdate: false });
+	let form = $state({ agent: 'opencode', model: '', proxy: '', webPort: '0', updateProxy: '', selfUpdate: false, followMaster: false });
 
 	let agents = $state<{ id: string; name?: string; version?: string }[]>([]);
 	let models = $state<string[]>([]);
@@ -303,6 +303,7 @@
 		form.webPort = String(port);
 		form.updateProxy = String(pick(configDoc, 'updateProxy', ''));
 		form.selfUpdate = Boolean(pick(configDoc, 'selfUpdate', false));
+		form.followMaster = Boolean(pick(configDoc, 'followMaster', false));
 		models = [];
 		detected = null;
 		update = null;
@@ -344,6 +345,7 @@
 		const port = Number(form.webPort);
 		doc.webPort = Number.isFinite(port) && port >= 0 && port <= 65535 ? Math.trunc(port) : 0;
 		doc.selfUpdate = form.selfUpdate;
+		doc.followMaster = form.followMaster;
 
 		busy = 'save';
 		setFeedback(t('settings.saving'));
@@ -739,6 +741,10 @@
 					<label class="flex items-center gap-1.5 pb-1 text-[11px] text-muted-foreground">
 						<input type="checkbox" class="accent-phase-work" bind:checked={form.selfUpdate} />
 						{t('settings.selfUpdate')}
+					</label>
+					<label class="flex items-center gap-1.5 pb-1 text-[11px] text-muted-foreground">
+						<input type="checkbox" class="accent-phase-work" bind:checked={form.followMaster} />
+						{t('settings.followMaster')}
 					</label>
 				</div>
 
