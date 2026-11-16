@@ -132,6 +132,10 @@ jobs:
 
   publish:
     needs: [binaries, desktop]
+    # A desktop bundle failing must not block the terminal binaries: those are
+    # what the self-updater installs. v0.2.0 shipped nothing because one desktop
+    # runner failed and this job was skipped entirely.
+    if: ${{ always() && needs.binaries.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -143,14 +147,30 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          sha256sum *.tar.gz *.zip *.dmg > checksums.txt
+          shopt -s nullglob
+          files=(*.tar.gz *.zip *.dmg)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "no release archives were produced" >&2
+            exit 1
+          fi
+          sha256sum "${files[@]}" > checksums.txt
           cat checksums.txt
 
       - name: publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            dist/* \
-            --title "${GITHUB_REF_NAME}" \
-            --generate-notes
+          set -euo pipefail
+          # The release may already exist: the dashboard can create one (with
+          # its tag) before the tag push triggers this workflow, and v0.2.0 was
+          # published by hand. `gh release create` fails with 422 in that case,
+          # so upload to the existing release and publish the draft.
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+            gh release edit "${GITHUB_REF_NAME}" --draft=false
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              dist/* \
+              --title "${GITHUB_REF_NAME}" \
+              --generate-notes
+          fi
