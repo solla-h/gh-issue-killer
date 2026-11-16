@@ -5,7 +5,7 @@ Guidance for coding agents working in this repository.
 ## What this is
 
 `gh-issue-killer` is a single Go binary that watches GitHub issues, runs a
-coding agent (opencode / Claude Code / Codex) in isolated git worktrees, runs
+coding agent (opencode / Claude Code / Codex / Pi / Oh My Pi) in isolated git worktrees, runs
 checks, opens PRs, repairs CI and squash-merges on command. All Go code is
 `package main` under `cmd/gh-issue-killer`.
 

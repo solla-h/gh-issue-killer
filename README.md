@@ -4,9 +4,9 @@
 
 [简体中文](README.zh-CN.md)
 
-Watch GitHub issues and let a coding agent (opencode, Claude Code, or Codex)
-plan → implement → test → screenshot → open a PR → squash-merge them, driven
-entirely from issue comments.
+Watch GitHub issues and let a coding agent (opencode, Claude Code, Codex,
+Pi, or Oh My Pi) plan → implement → test → screenshot → open a PR →
+squash-merge them, driven entirely from issue comments.
 
 ## Workflow
 
@@ -93,7 +93,7 @@ Details: [DEPLOY.md](DEPLOY.md#31-desktop-app--optional).
 
 ## Install with a coding agent
 
-Give Claude Code, Codex or opencode this repository and paste this into it:
+Give Claude Code, Codex, opencode, Pi, or Oh My Pi this repository and paste this into it:
 
 ```text
 Deploy gh-issue-killer on this machine by following DEPLOY.md §0–§5 (skip §6
@@ -103,7 +103,7 @@ question, only if a value truly cannot be inferred.
 Defaults, use them without confirming:
 - repos: the origin remote of this git checkout; if there is none, ask me once
 - approver: my GitHub login from `gh api user --jq .login`
-- codingAgent: the first of opencode, claude, codex found on PATH
+- codingAgent: the first of opencode, claude, codex, pi, omp found on PATH
 - model: the CLI default (leave it empty)
 - proxy: $https_proxy or $ALL_PROXY if set, otherwise none
 - binary: ~/.local/bin/gh-issue-killer, config: ~/.config/gh-issue-killer/config.json

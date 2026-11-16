@@ -43,7 +43,7 @@ HB="gh-issue-killer"                             # binary name on PATH
 | `REPOS` | `git remote get-url origin` of the current checkout, if it is a GitHub repo |
 | `AGENT_LOGIN` | the bot login from the dashboard (`~/.gh-issue-killer/token`), `GH_AGENT_TOKEN`, or the legacy `gh-agent` hosts file |
 | approver | the human's login from `gh api user --jq .login` |
-| `codingAgent` | first of `opencode`, `claude`, `codex` on `PATH` |
+| `codingAgent` | first of `opencode`, `claude`, `codex`, `pi`, `omp` on `PATH` |
 | model | empty (CLI default) |
 | proxy | `$https_proxy` / `$ALL_PROXY` if set, otherwise none |
 | `BIN_DIR` | `$HOME/.local/bin` |
@@ -57,7 +57,7 @@ Write down every assumption in the final report instead of asking about it.
 uname -s
 go version                                   # need go1.27+
 git --version                                # need 2.5+
-command -v opencode claude codex             # at least one
+command -v opencode claude codex pi omp       # at least one
 [ -n "$GH_AGENT_TOKEN" ] && echo token:env
 [ -f "$HOME/.gh-issue-killer/token" ] && echo token:file || echo token:file-missing
 ```
@@ -70,7 +70,7 @@ command -v opencode claude codex             # at least one
 | Windows | supported: the binary builds and runs there (`process_windows.go`), but `scripts/smoke-test.sh` needs a POSIX shell. Prefer the desktop app below |
 
 The coding agent must work unattended on this machine, as the same user
-(`opencode run`, `claude -p`, `codex exec`). If unsure, run its help command;
+(`opencode run`, `claude -p`, `codex exec`, `pi -p`, `omp -p`). If unsure, run its help command;
 do not start the daemon until one of them exists.
 
 ## 2. Agent identity and access — ENSURE
@@ -231,7 +231,7 @@ Non-zero exit or missing lines → see failures.
 | key | required | default | meaning |
 | --- | --- | --- | --- |
 | `repos` | ✅ | – | `"owner/repo"` list, or an object for per-repo overrides (`{"me/app": {"codingAgent": "claude"}}`) |
-| `codingAgent` | | `opencode` | coding-agent CLI: `opencode`, `claude`, or `codex` |
+| `codingAgent` | | `opencode` | coding-agent CLI: `opencode`, `claude`, `codex`, `pi`, or `omp` |
 | `model` | | – (CLI default) | optional model passed to the selected CLI |
 | `approvers` | | repo owner | logins allowed to command the bot |
 | `proxy` | | direct | `socks5h://host:port` (remote DNS for git, `socks5://` for Go clients), `socks5://`, `http://`, or `https://` |
@@ -320,10 +320,56 @@ token already has.
 | `opencode` (default) | opencode | `opencode run --format json --auto [--model] [--session]` |
 | `claude` | Claude Code | `claude -p --output-format json --permission-mode bypassPermissions [--model] [--resume/--session-id] --add-dir <runDir>` |
 | `codex` | Codex CLI | `codex exec --cd <worktree> --full-auto [--model] [--add-dir <runDir>] --output-last-message <file>` |
+| `pi` | Pi | `pi -p --mode json [--model] --session-id <id>` |
+| `omp` | Oh My Pi | `omp -p --mode json [--model] [--resume <id>]` |
 
 `agent` is no longer a config field; an old value is ignored with a warning.
 Sessions are reused for fix rounds where the CLI supports it (opencode
-`--session`, Claude `--resume`; Codex starts a fresh run with full context).
+`--session`, Claude `--resume`, Pi `--session-id`, omp `--resume`; Codex starts
+a fresh run with full context). Pi's `--resume` is not used: in print mode it
+opens the interactive session picker instead of resuming, so the daemon always
+passes `--session-id` for Pi, reusing the stored id on later stages.
+
+Pi and omp read their model providers from their own config files, not from
+the daemon config: `~/.pi/agent/models.json` for Pi,
+`~/.omp/agent/models.yml` for omp. Both take an OpenAI-compatible endpoint
+with the model id, for example a relay gateway:
+
+```json
+// ~/.pi/agent/models.json — apiKey uses $NAME environment interpolation
+{
+  "providers": {
+    "my-gateway": {
+      "baseUrl": "https://gateway.example.com/v1",
+      "api": "openai-completions",
+      "apiKey": "$MY_GATEWAY_API_KEY",
+      "authHeader": true,
+      "models": [{ "id": "my-model", "contextWindow": 128000, "maxTokens": 16384 }]
+    }
+  }
+}
+```
+
+```yaml
+# ~/.omp/agent/models.yml — apiKey is a bare environment variable name
+providers:
+  my-gateway:
+    baseUrl: https://gateway.example.com/v1
+    api: openai-completions
+    apiKey: MY_GATEWAY_API_KEY
+    authHeader: true
+    models:
+      - id: my-model
+        contextWindow: 128000
+        maxTokens: 16384
+```
+
+The key stays out of the file: it is resolved from the environment at request
+time, so the daemon must run with the variable set (for example in the systemd
+unit from §6). A custom header a gateway requires (such as a device id) goes in
+the provider's `headers` with the same interpolation. `model` in the daemon
+config is passed through as `--model`, using the `provider/id` form when the
+model id alone is ambiguous.
 
 ## 5. Start and verify
 

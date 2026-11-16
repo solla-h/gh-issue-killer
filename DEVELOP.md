@@ -413,12 +413,6 @@ divider, uploads through GitHub’s user-attachments endpoint, and the result is
 embedded in the PR and the comment. Backend/docs/test changes must not produce
 screenshots.
 
-UI verification is tool-agnostic on purpose: prompts ask for real browser or
-desktop automation (Playwright, cua-driver, the repo’s own E2E harness — whatever
-is available) and never a specific API, so desktop apps and repositories without
-Playwright can still prove a UI change. The agent exercises the changed control
-and checks the console before writing `result.json`.
-
 ## 11. GitHub client and labels (`gh.go`)
 
 `NewGH` builds an `http.Client` with the configured proxy, resolves the bot
@@ -450,12 +444,19 @@ are unavailable the poller is the fallback; both funnel into `Router.Handle*`.
 
 ## 13. Coding agents (`runner.go`)
 
-Registry: `opencode`, `claude`, `codex`; chosen per repo via `codingAgent`,
-model via `model`. `Runner.Run` starts the CLI in the worktree, streams the
-log file, enforces the stage timeout and parses the JSON event stream for the
-final text and session id. Sessions are reused across implement → revise →
-CI repair so the agent keeps context. Prompts are never passed through the
-shell; they are a single argv entry.
+Registry: `opencode`, `claude`, `codex`, `pi`, `omp`; chosen per repo via
+`codingAgent`, model via `model`. `Runner.Run` starts the CLI in the worktree,
+streams the log file, enforces the stage timeout and parses the JSON event
+stream for the final text and session id. Sessions are reused across
+implement → revise → CI repair so the agent keeps context. Prompts are never
+passed through the shell; they are a single argv entry. Pi and omp share one
+JSONL parser (`piJSONAccumulator`): both emit a session header first, then
+`message_end` events carrying the assistant text, and `auto_retry_end` with
+`finalError` on a failed retry cap. Pi is always run with `--session-id`
+(a fresh UUID, then the stored id): its `--resume` opens the interactive
+session picker in print mode instead of resuming. omp has no `--session-id`
+flag, so a fresh run takes its id from the session header and later stages
+continue it with `--resume`.
 
 ## 14. Config
 
@@ -537,8 +538,7 @@ empty states, lives in the `zh`/`en` tables in `$lib/i18n.svelte.ts`;
 the browser. `planParallel` and `implementParallel` size each repository's own
 pool, so the PLAN/WORK meters are rendered per repository line rather than
 globally. A board toggle hides `done` and `cancelled` tasks on top of the other
-filters; it is on by default, so the board opens on active work. The console
-starts collapsed for the same reason and only polls `/api/logs` once expanded.
+filters; it is off by default.
 
 The settings button opens a panel over the board: repos (array, array of
 objects or object form, with per-repo overrides preserved), one release row per
@@ -633,9 +633,8 @@ must stay clean; `gofmt -l .` must print nothing.
 
 The dashboard is tested with its own toolchain: `npm --prefix frontend run check`
 (svelte-check) and `npm --prefix frontend run build`. Any change to `frontend/`
-or to the dashboard handlers in `web.go` must also be driven with real browser or
-desktop automation (Playwright, cua-driver, the repo’s own E2E setup — whatever
-is available) before it is called done — open the page against a
+or to the dashboard handlers in `web.go` must also be driven in a real browser
+with Playwright or cua-driver before it is called done — open the page against a
 running engine, exercise the changed component (both themes when colours
 changed), read the browser console, and keep the before/after screenshots. A
 green unit check does not cover the UI; skipping this step is not allowed.
