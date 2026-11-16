@@ -127,7 +127,23 @@
 											: ''
 								)}
 							></i>
-							{task.repo} #{task.number}
+							{#if task.url}
+								<a
+									href={task.url}
+									target="_blank"
+									rel="noreferrer"
+									class="hover:text-foreground hover:underline hover:underline-offset-2"
+									onclick={(event) => {
+										event.stopPropagation();
+										openExternal(task.url);
+										event.preventDefault();
+									}}
+								>
+									{task.repo} #{task.number}
+								</a>
+							{:else}
+								{task.repo} #{task.number}
+							{/if}
 						</span>
 						<span class="block truncate text-[12.5px] text-foreground">
 							{task.title || 'issue #' + task.number}

@@ -61,22 +61,32 @@
 			{#if issue}
 				<div class="flex flex-wrap gap-3.5 text-[11px]">
 					{#if task.url}
-						<button
-							type="button"
+						<a
+							href={task.url}
+							target="_blank"
+							rel="noreferrer"
 							class="text-primary hover:underline hover:underline-offset-2"
-							onclick={() => openExternal(task.url)}
+							onclick={(event) => {
+								event.preventDefault();
+								openExternal(task.url);
+							}}
 						>
 							{t('drawer.openIssue')}
-						</button>
+						</a>
 					{/if}
 					{#if task.prUrl}
-						<button
-							type="button"
+						<a
+							href={task.prUrl}
+							target="_blank"
+							rel="noreferrer"
 							class="text-primary hover:underline hover:underline-offset-2"
-							onclick={() => openExternal(task.prUrl)}
+							onclick={(event) => {
+								event.preventDefault();
+								openExternal(task.prUrl);
+							}}
 						>
 							{t('drawer.openPR', { n: task.prNumber })}
-						</button>
+						</a>
 					{/if}
 				</div>
 

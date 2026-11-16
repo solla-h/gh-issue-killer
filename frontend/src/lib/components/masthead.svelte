@@ -94,13 +94,17 @@
 			>
 				{t('settings.open')}
 			</Button>
-			<Button
-				variant="outline"
-				size="sm"
-				class="h-6 px-2 text-[10.5px]"
+			<a
+				href="https://github.com/uiautodev/gh-issue-killer"
+				target="_blank"
+				rel="noreferrer"
+				class="inline-flex h-6 items-center gap-1.5 rounded-md border border-input bg-background px-2 text-[10.5px] font-medium whitespace-nowrap transition-colors hover:bg-accent hover:text-accent-foreground"
 				aria-label={t('github.aria')}
 				data-testid="github-link"
-				onclick={() => openExternal('https://github.com/uiautodev/gh-issue-killer')}
+				onclick={(event) => {
+					event.preventDefault();
+					openExternal('https://github.com/uiautodev/gh-issue-killer');
+				}}
 			>
 				<svg viewBox="0 0 16 16" aria-hidden="true" class="size-3.5 fill-current">
 					<path
@@ -108,7 +112,7 @@
 					/>
 				</svg>
 				<span>{t('github.label')}</span>
-			</Button>
+			</a>
 
 			<div
 				class="flex h-6 items-stretch overflow-hidden rounded-md border border-input"

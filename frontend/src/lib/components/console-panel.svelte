@@ -4,7 +4,7 @@
 	import { cn } from '#lib/utils.ts';
 	import Button from '#lib/components/ui/button.svelte';
 
-	let pre = $state<HTMLPreElement | null>(null);
+	let pre = $state<HTMLDivElement | null>(null);
 	let stick = true;
 
 	const levelColor: Record<string, string> = {
@@ -67,7 +67,7 @@
 			{dashboard.logPaused ? t('log.resume') : t('log.pause')}
 		</Button>
 	</div>
-	<pre
+	<div
 		bind:this={pre}
 		class={cn(
 			'm-0 max-h-[210px] overflow-auto text-[10.5px] leading-relaxed whitespace-pre-wrap break-words text-muted-foreground',
@@ -85,8 +85,8 @@
 					<span class="text-muted-foreground/70">{line.time} </span><span class="font-semibold">{line.level}</span> {line.message}
 				</span>
 			{:else}
-				<span class="block">{line.text + '\n'}</span>
+				<span class="block">{line.text}</span>
 			{/if}
 		{/each}
-	</pre>
+	</div>
 </section>
