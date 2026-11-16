@@ -413,6 +413,12 @@ divider, uploads through GitHub’s user-attachments endpoint, and the result is
 embedded in the PR and the comment. Backend/docs/test changes must not produce
 screenshots.
 
+UI verification is tool-agnostic on purpose: prompts ask for real browser or
+desktop automation (Playwright, cua-driver, the repo’s own E2E harness — whatever
+is available) and never a specific API, so desktop apps and repositories without
+Playwright can still prove a UI change. The agent exercises the changed control
+and checks the console before writing `result.json`.
+
 ## 11. GitHub client and labels (`gh.go`)
 
 `NewGH` builds an `http.Client` with the configured proxy, resolves the bot
@@ -456,7 +462,13 @@ JSONL parser (`piJSONAccumulator`): both emit a session header first, then
 (a fresh UUID, then the stored id): its `--resume` opens the interactive
 session picker in print mode instead of resuming. omp has no `--session-id`
 flag, so a fresh run takes its id from the session header and later stages
-continue it with `--resume`.
+continue it with `--resume`. `agent_end` is one JSON line holding every message
+of the run, so `runProcess` never stops at an oversized record: the line is cut
+at 8MB, drained and the scan continues, and a truncated record is logged as a
+WARN. A pi/omp run that decodes no JSON event at all fails the stage even when
+the CLI exited 0 (`piStreamError`), because `omp --resume` can fall back to the
+interactive session picker; text is not required, so a terse agent still
+passes.
 
 ## 14. Config
 
@@ -538,7 +550,8 @@ empty states, lives in the `zh`/`en` tables in `$lib/i18n.svelte.ts`;
 the browser. `planParallel` and `implementParallel` size each repository's own
 pool, so the PLAN/WORK meters are rendered per repository line rather than
 globally. A board toggle hides `done` and `cancelled` tasks on top of the other
-filters; it is off by default.
+filters; it is on by default, so the board opens on active work. The console
+starts collapsed for the same reason and only polls `/api/logs` once expanded.
 
 The settings button opens a panel over the board: repos (array, array of
 objects or object form, with per-repo overrides preserved), one release row per
@@ -633,8 +646,9 @@ must stay clean; `gofmt -l .` must print nothing.
 
 The dashboard is tested with its own toolchain: `npm --prefix frontend run check`
 (svelte-check) and `npm --prefix frontend run build`. Any change to `frontend/`
-or to the dashboard handlers in `web.go` must also be driven in a real browser
-with Playwright or cua-driver before it is called done — open the page against a
+or to the dashboard handlers in `web.go` must also be driven with real browser or
+desktop automation (Playwright, cua-driver, the repo’s own E2E setup — whatever
+is available) before it is called done — open the page against a
 running engine, exercise the changed component (both themes when colours
 changed), read the browser console, and keep the before/after screenshots. A
 green unit check does not cover the UI; skipping this step is not allowed.

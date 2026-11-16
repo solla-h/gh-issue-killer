@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,12 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+)
+
+const (
+	stdoutRecordLimit = 8 << 20 // a single stdout record, not the whole stream
+	stderrRecordLimit = 2 << 20
+	runnerDrainGrace  = 5 * time.Second
 )
 
 // CodingAgentInfo describes a supported coding-agent CLI.
@@ -138,17 +145,31 @@ func runProcess(ctx context.Context, binary string, args []string, opts RunnerOp
 	cmd.Stdin = nil // /dev/null: non-interactive CLIs must not wait for input
 	cmd.SysProcAttr = childSysProcAttr()
 
-	stdoutPipe, err := cmd.StdoutPipe()
+	// The daemon owns these pipes: cmd.Wait closes pipes it created itself,
+	// which races a reader that is still draining a multi-megabyte record and
+	// silently drops the tail of the stream.
+	stdoutRead, stdoutWrite, err := os.Pipe()
 	if err != nil {
 		return processResult{}, err
 	}
-	stderrPipe, err := cmd.StderrPipe()
+	defer stdoutRead.Close()
+	stderrRead, stderrWrite, err := os.Pipe()
 	if err != nil {
+		stdoutWrite.Close()
 		return processResult{}, err
 	}
+	defer stderrRead.Close()
+	cmd.Stdout = stdoutWrite
+	cmd.Stderr = stderrWrite
 	if err := cmd.Start(); err != nil {
+		stdoutWrite.Close()
+		stderrWrite.Close()
 		return processResult{}, err
 	}
+	// The child holds the write ends now; ours would keep the readers from
+	// seeing EOF.
+	stdoutWrite.Close()
+	stderrWrite.Close()
 
 	var logFile *os.File
 	if opts.LogFile != "" {
@@ -165,56 +186,150 @@ func runProcess(ctx context.Context, binary string, args []string, opts RunnerOp
 	}
 
 	var stdoutBuf, stderrBuf limitedBuffer
-	stdoutBuf.limit = 8 * 1024 * 1024
-	stderrBuf.limit = 2 * 1024 * 1024
+	stdoutBuf.limit = stdoutRecordLimit
+	stderrBuf.limit = stderrRecordLimit
 
-	done := make(chan error, 2)
+	// scanLines drains over-long records instead of stopping, so a child that
+	// writes one huge line cannot block on a full pipe once the reader quits.
+	var stdoutScanErr, stderrScanErr error
+	done := make(chan struct{}, 2)
 	go func() {
-		scanner := bufio.NewScanner(stdoutPipe)
-		scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
-		for scanner.Scan() {
-			line := scanner.Text()
+		warned := false
+		stdoutScanErr = scanLines(stdoutRead, stdoutRecordLimit, func(line string, truncated bool) {
+			if truncated && !warned {
+				warned = true
+				if opts.Log != nil {
+					opts.Log.Warn("stdout record exceeds %d MB; its tail is dropped from the runner log and the event stream", stdoutRecordLimit>>20)
+				}
+			}
 			stdoutBuf.Write([]byte(line + "\n"))
 			writeLog(line)
 			if onStdout != nil {
 				onStdout(line)
 			}
-		}
-		done <- scanner.Err()
+		})
+		done <- struct{}{}
 	}()
 	go func() {
-		scanner := bufio.NewScanner(stderrPipe)
-		scanner.Buffer(make([]byte, 64*1024), 2*1024*1024)
-		for scanner.Scan() {
-			line := scanner.Text()
+		warned := false
+		stderrScanErr = scanLines(stderrRead, stderrRecordLimit, func(line string, truncated bool) {
+			if truncated && !warned {
+				warned = true
+				if opts.Log != nil {
+					opts.Log.Warn("stderr record exceeds %d MB; its tail is dropped from the runner log", stderrRecordLimit>>20)
+				}
+			}
 			stderrBuf.Write([]byte(line + "\n"))
 			writeLog("[stderr] " + line)
-		}
-		done <- scanner.Err()
+		})
+		done <- struct{}{}
 	}()
 
 	waitErr := cmd.Wait()
-	<-done
-	<-done
+	timedOut := runCtx.Err() == context.DeadlineExceeded
+	if timedOut && cmd.Process != nil {
+		// Kill descendants before draining: one of them may be the only
+		// holder of the write end.
+		killChildTree(cmd.Process.Pid)
+	}
+	// A CLI can leave a grandchild holding stdout (a detached shell command),
+	// so EOF is not guaranteed once the CLI exits. Give the readers a grace
+	// period, then close the pipes to unblock them instead of hanging the stage.
+	drained := make(chan struct{})
+	go func() {
+		<-done
+		<-done
+		close(drained)
+	}()
+	select {
+	case <-drained:
+	case <-time.After(runnerDrainGrace):
+		if opts.Log != nil {
+			opts.Log.Warn("coding agent output still open %s after exit; closing the pipes", runnerDrainGrace)
+		}
+		_ = stdoutRead.Close()
+		_ = stderrRead.Close()
+		<-drained
+	}
 
-	result := processResult{Stdout: stdoutBuf.String(), Stderr: stderrBuf.String()}
+	result := processResult{Stdout: stdoutBuf.String(), Stderr: stderrBuf.String(), TimedOut: timedOut}
 	if cmd.ProcessState != nil {
 		result.Code = cmd.ProcessState.ExitCode()
 	}
 	if opts.Log != nil {
 		opts.Log.Debug("runner exit: code=%d timedOut=%v duration=%s", result.Code, result.TimedOut, time.Since(started).Round(time.Millisecond))
 	}
-	if runCtx.Err() == context.DeadlineExceeded {
-		result.TimedOut = true
-		if cmd.Process != nil {
-			killChildTree(cmd.Process.Pid)
-		}
+	if result.TimedOut {
 		return result, fmt.Errorf("coding agent timed out after %s", opts.Timeout)
 	}
 	if waitErr != nil {
 		return result, fmt.Errorf("coding agent exited %d: %s", result.Code, tailString(result.Stderr, 20))
 	}
+	if err := firstPlaybackError(stdoutScanErr, stderrScanErr); err != nil {
+		return result, fmt.Errorf("read coding agent output: %w", err)
+	}
 	return result, nil
+}
+
+// firstPlaybackError reports the first real read failure. A reader unblocked by
+// closing its pipe after the drain grace reports os.ErrClosed, and a writer that
+// closes a pipe reports io.ErrClosedPipe; neither is a failed stage.
+func firstPlaybackError(errs ...error) error {
+	for _, err := range errs {
+		if err == nil || errors.Is(err, os.ErrClosed) || errors.Is(err, io.ErrClosedPipe) {
+			continue
+		}
+		return err
+	}
+	return nil
+}
+
+// scanLines calls fn for every newline-delimited record of r. Unlike
+// bufio.Scanner it does not abandon the stream on a record longer than max:
+// the record is cut at max, the remainder is drained to the next newline and
+// the flag says so. pi/omp end a run with agent_end, one JSON line holding
+// every message of the run, so a long stage regularly exceeds any sane cap;
+// stopping there would leave the child blocked on a full stdout pipe until the
+// stage timeout kills it, with no diagnostic.
+func scanLines(r io.Reader, max int, fn func(line string, truncated bool)) error {
+	reader := bufio.NewReaderSize(r, 64*1024)
+	line := make([]byte, 0, 4096)
+	truncated := false
+	for {
+		chunk, err := reader.ReadSlice('\n')
+		complete := err == nil
+		if complete {
+			chunk = chunk[:len(chunk)-1] // the newline is the separator
+		}
+		if len(chunk) > 0 {
+			room := max - len(line)
+			switch {
+			case room >= len(chunk):
+				line = append(line, chunk...)
+			case !truncated:
+				if room > 0 {
+					line = append(line, chunk[:room]...)
+				}
+				truncated = true
+			}
+		}
+		switch {
+		case complete:
+			fn(string(line), truncated)
+			line = line[:0]
+			truncated = false
+		case errors.Is(err, bufio.ErrBufferFull):
+			continue
+		default: // EOF or a read failure: hand over the trailing record first
+			if len(line) > 0 || truncated {
+				fn(string(line), truncated)
+			}
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+	}
 }
 
 func runnerBinary(info CodingAgentInfo) (string, error) {
@@ -479,14 +594,42 @@ type piJSONEvent struct {
 	FinalError string `json:"finalError"`
 	Success    *bool  `json:"success"` // auto_retry_end
 	Message    struct {
-		Role         string `json:"role"`
-		StopReason   string `json:"stopReason"`
-		ErrorMessage string `json:"errorMessage"`
-		Content      []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
+		Role         string    `json:"role"`
+		StopReason   string    `json:"stopReason"`
+		ErrorMessage string    `json:"errorMessage"`
+		Content      piContent `json:"content"`
 	} `json:"message"`
+}
+
+// piContent decodes the two shapes pi emits for message content: an array of
+// parts for assistant and tool messages, and a bare string for user messages
+// (docs/json.md records the string form). Decoding straight into a slice made
+// json.Unmarshal reject the whole record, so one string-content message would
+// silently drop the rest of that line's fields — including an assistant's
+// stopReason or errorMessage. Unknown shapes decode to no parts, never an
+// error, for the same reason.
+type piContent struct {
+	parts []piContentPart
+}
+
+type piContentPart struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+func (c *piContent) UnmarshalJSON(data []byte) error {
+	var parts []piContentPart
+	if err := json.Unmarshal(data, &parts); err == nil {
+		c.parts = parts
+		return nil
+	}
+	var text string
+	if err := json.Unmarshal(data, &text); err == nil {
+		c.parts = []piContentPart{{Type: "text", Text: text}}
+		return nil
+	}
+	c.parts = nil
+	return nil
 }
 
 // piJSONAccumulator folds a pi/omp JSONL stream into a session id, the
@@ -495,6 +638,7 @@ type piJSONAccumulator struct {
 	sessionID string
 	texts     []string
 	errText   string
+	records   int // decoded JSON events, excluding non-JSON noise
 }
 
 // text joins the collected assistant texts the way the runners report
@@ -508,6 +652,7 @@ func (a *piJSONAccumulator) feed(line string) {
 	if json.Unmarshal([]byte(line), &event) != nil {
 		return // non-JSON lines (e.g. terminal escapes) are skipped
 	}
+	a.records++
 	switch event.Type {
 	case "session":
 		if event.ID != "" {
@@ -518,7 +663,7 @@ func (a *piJSONAccumulator) feed(line string) {
 			return
 		}
 		added := false
-		for _, block := range event.Message.Content {
+		for _, block := range event.Message.Content.parts {
 			if block.Type == "text" && block.Text != "" {
 				a.texts = append(a.texts, block.Text)
 				added = true
@@ -581,8 +726,8 @@ func (r *piRunner) Run(ctx context.Context, opts RunnerOptions) (RunnerResult, e
 	if runErr != nil {
 		return result, runErr
 	}
-	if result.Text == "" && result.ErrText != "" {
-		return result, fmt.Errorf("pi failed: %s", result.ErrText)
+	if err := piStreamError("pi", acc, result); err != nil {
+		return result, err
 	}
 	return result, nil
 }
@@ -625,8 +770,28 @@ func (r *ompRunner) Run(ctx context.Context, opts RunnerOptions) (RunnerResult, 
 	if runErr != nil {
 		return result, runErr
 	}
-	if result.Text == "" && result.ErrText != "" {
-		return result, fmt.Errorf("omp failed: %s", result.ErrText)
+	if err := piStreamError("omp", acc, result); err != nil {
+		return result, err
 	}
 	return result, nil
+}
+
+// piStreamError turns the terminal state of a pi/omp stream into the error the
+// runner returns. A stream with no parsable record at all is a failed stage
+// even when the CLI exited 0: omp --resume can resolve to the interactive
+// session picker, which prints terminal escapes instead of JSON, and a
+// truncated stream looks the same. Text is deliberately not required — a terse
+// agent may write files and say little — so only "nothing decoded" fails.
+func piStreamError(name string, acc *piJSONAccumulator, result RunnerResult) error {
+	if acc.records == 0 {
+		msg := fmt.Sprintf("%s exited %d without a parsable JSON event; check that the installed %s supports -p --mode json", name, result.Code, name)
+		if tail := tailString(result.Stderr, 5); tail != "" {
+			msg += ": " + tail
+		}
+		return errors.New(msg)
+	}
+	if result.Text == "" && result.ErrText != "" {
+		return fmt.Errorf("%s failed: %s", name, result.ErrText)
+	}
+	return nil
 }
