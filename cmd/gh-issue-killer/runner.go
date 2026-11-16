@@ -26,6 +26,8 @@ var codingAgentRegistry = []CodingAgentInfo{
 	{ID: "opencode", Name: "opencode", Binary: "opencode", InstallHint: "https://opencode.ai"},
 	{ID: "claude", Name: "Claude Code", Binary: "claude", InstallHint: "https://docs.anthropic.com/en/docs/claude-code"},
 	{ID: "codex", Name: "Codex CLI", Binary: "codex", InstallHint: "https://github.com/openai/codex"},
+	{ID: "pi", Name: "Pi", Binary: "pi", InstallHint: "https://pi.dev"},
+	{ID: "omp", Name: "Oh My Pi", Binary: "omp", InstallHint: "https://omp.sh"},
 }
 
 func codingAgentInfoByID(id string) (CodingAgentInfo, bool) {
@@ -100,6 +102,10 @@ func newCodingRunner(id string) (CodingRunner, error) {
 		return &claudeRunner{}, nil
 	case "codex":
 		return &codexRunner{}, nil
+	case "pi":
+		return &piRunner{}, nil
+	case "omp":
+		return &ompRunner{}, nil
 	default:
 		return nil, fmt.Errorf("unsupported codingAgent %q (supported: %s)", id, supportedCodingAgentList())
 	}
@@ -440,6 +446,187 @@ func (r *codexRunner) Run(ctx context.Context, opts RunnerOptions) (RunnerResult
 	}
 	if runErr != nil {
 		return result, runErr
+	}
+	return result, nil
+}
+
+// ---------------------------------------------------------------------------
+// Pi and Oh My Pi (omp)
+//
+// Both CLIs share the same --mode json event stream: pi documents it at
+// pi.dev (docs/json.md) and omp, a Pi fork, emits the same records. The
+// stream is JSONL: a session header first, then agent/turn/message events,
+// ending with agent_end (and agent_settled for pi; omp stops after
+// agent_end). One parser serves both runners.
+//
+// Two CLI quirks matter here, both verified against pi 1.5.2 / omp 18.20.3:
+//   - Pi waits on stdin in print mode when stdin is an open pipe, so the
+//     daemon must keep stdin at /dev/null (runProcess already does).
+//   - Pi's --resume opens the interactive session picker even with -p
+//     --mode json, emitting terminal escapes instead of JSON. Resume is
+//     therefore done with --session-id (same flag as a fresh run): pi
+//     continues the session whose id is passed. omp has no --session-id
+//     flag, so a fresh run takes its id from the session header and a
+//     later stage continues it with --resume, which does work in
+//     print mode.
+// ---------------------------------------------------------------------------
+
+// piJSONEvent is one record of the pi/omp --mode json stream. Only the
+// fields the daemon needs are decoded; anything else is ignored.
+type piJSONEvent struct {
+	Type       string `json:"type"`
+	ID         string `json:"id"` // session header
+	FinalError string `json:"finalError"`
+	Success    *bool  `json:"success"` // auto_retry_end
+	Message    struct {
+		Role         string `json:"role"`
+		StopReason   string `json:"stopReason"`
+		ErrorMessage string `json:"errorMessage"`
+		Content      []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	} `json:"message"`
+}
+
+// piJSONAccumulator folds a pi/omp JSONL stream into a session id, the
+// assistant's text and the terminal error, if any.
+type piJSONAccumulator struct {
+	sessionID string
+	texts     []string
+	errText   string
+}
+
+// text joins the collected assistant texts the way the runners report
+// them: text parts are separate messages, not one stream.
+func (a *piJSONAccumulator) text() string {
+	return strings.TrimSpace(strings.Join(a.texts, "\n\n"))
+}
+
+func (a *piJSONAccumulator) feed(line string) {
+	var event piJSONEvent
+	if json.Unmarshal([]byte(line), &event) != nil {
+		return // non-JSON lines (e.g. terminal escapes) are skipped
+	}
+	switch event.Type {
+	case "session":
+		if event.ID != "" {
+			a.sessionID = event.ID
+		}
+	case "message_end":
+		if event.Message.Role != "assistant" {
+			return
+		}
+		added := false
+		for _, block := range event.Message.Content {
+			if block.Type == "text" && block.Text != "" {
+				a.texts = append(a.texts, block.Text)
+				added = true
+			}
+		}
+		switch event.Message.StopReason {
+		case "stop":
+			if added {
+				// A later good answer supersedes transient retry errors.
+				a.errText = ""
+			}
+		case "error":
+			if event.Message.ErrorMessage != "" {
+				a.errText = event.Message.ErrorMessage
+			}
+		}
+	case "auto_retry_end":
+		if event.Success != nil && !*event.Success && event.FinalError != "" {
+			a.errText = event.FinalError
+		}
+	}
+}
+
+type piRunner struct{}
+
+func (r *piRunner) ID() string { return "pi" }
+
+func piArgs(opts RunnerOptions, sessionID string) []string {
+	args := []string{"-p", "--mode", "json"}
+	if opts.Model != "" {
+		args = append(args, "--model", opts.Model)
+	}
+	args = append(args, "--session-id", sessionID, opts.Prompt)
+	return args
+}
+
+func (r *piRunner) Run(ctx context.Context, opts RunnerOptions) (RunnerResult, error) {
+	info, _ := codingAgentInfoByID("pi")
+	binary, err := runnerBinary(info)
+	if err != nil {
+		return RunnerResult{}, err
+	}
+	sessionID := opts.SessionID
+	if sessionID == "" {
+		sessionID = newUUID()
+	}
+	if opts.Log != nil {
+		opts.Log.Debug("pi run: session=%s model=%s cwd=%s", sessionID, firstNonEmpty(opts.Model, "(default)"), opts.Cwd)
+	}
+	acc := &piJSONAccumulator{sessionID: sessionID}
+	proc, runErr := runProcess(ctx, binary, piArgs(opts, sessionID), opts, acc.feed)
+	result := RunnerResult{
+		SessionID: acc.sessionID,
+		Text:      acc.text(),
+		Code:      proc.Code,
+		TimedOut:  proc.TimedOut,
+		Stderr:    tailString(proc.Stderr, 50),
+		ErrText:   acc.errText,
+	}
+	if runErr != nil {
+		return result, runErr
+	}
+	if result.Text == "" && result.ErrText != "" {
+		return result, fmt.Errorf("pi failed: %s", result.ErrText)
+	}
+	return result, nil
+}
+
+type ompRunner struct{}
+
+func (r *ompRunner) ID() string { return "omp" }
+
+func ompArgs(opts RunnerOptions) []string {
+	args := []string{"-p", "--mode", "json"}
+	if opts.Model != "" {
+		args = append(args, "--model", opts.Model)
+	}
+	if opts.SessionID != "" {
+		args = append(args, "--resume", opts.SessionID)
+	}
+	args = append(args, opts.Prompt)
+	return args
+}
+
+func (r *ompRunner) Run(ctx context.Context, opts RunnerOptions) (RunnerResult, error) {
+	info, _ := codingAgentInfoByID("omp")
+	binary, err := runnerBinary(info)
+	if err != nil {
+		return RunnerResult{}, err
+	}
+	if opts.Log != nil {
+		opts.Log.Debug("omp run: session=%s model=%s cwd=%s", firstNonEmpty(opts.SessionID, "(new)"), firstNonEmpty(opts.Model, "(default)"), opts.Cwd)
+	}
+	acc := &piJSONAccumulator{sessionID: opts.SessionID}
+	proc, runErr := runProcess(ctx, binary, ompArgs(opts), opts, acc.feed)
+	result := RunnerResult{
+		SessionID: acc.sessionID,
+		Text:      acc.text(),
+		Code:      proc.Code,
+		TimedOut:  proc.TimedOut,
+		Stderr:    tailString(proc.Stderr, 50),
+		ErrText:   acc.errText,
+	}
+	if runErr != nil {
+		return result, runErr
+	}
+	if result.Text == "" && result.ErrText != "" {
+		return result, fmt.Errorf("omp failed: %s", result.ErrText)
 	}
 	return result, nil
 }
