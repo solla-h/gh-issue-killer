@@ -450,12 +450,25 @@ are unavailable the poller is the fallback; both funnel into `Router.Handle*`.
 
 ## 13. Coding agents (`runner.go`)
 
-Registry: `opencode`, `claude`, `codex`; chosen per repo via `codingAgent`,
-model via `model`. `Runner.Run` starts the CLI in the worktree, streams the
-log file, enforces the stage timeout and parses the JSON event stream for the
-final text and session id. Sessions are reused across implement → revise →
-CI repair so the agent keeps context. Prompts are never passed through the
-shell; they are a single argv entry.
+Registry: `opencode`, `claude`, `codex`, `pi`, `omp`; chosen per repo via
+`codingAgent`, model via `model`. `Runner.Run` starts the CLI in the worktree,
+streams the log file, enforces the stage timeout and parses the JSON event
+stream for the final text and session id. Sessions are reused across
+implement → revise → CI repair so the agent keeps context. Prompts are never
+passed through the shell; they are a single argv entry. Pi and omp share one
+JSONL parser (`piJSONAccumulator`): both emit a session header first, then
+`message_end` events carrying the assistant text, and `auto_retry_end` with
+`finalError` on a failed retry cap. Pi is always run with `--session-id`
+(a fresh UUID, then the stored id): its `--resume` opens the interactive
+session picker in print mode instead of resuming. omp has no `--session-id`
+flag, so a fresh run takes its id from the session header and later stages
+continue it with `--resume`. `agent_end` is one JSON line holding every message
+of the run, so `runProcess` never stops at an oversized record: the line is cut
+at 8MB, drained and the scan continues, and a truncated record is logged as a
+WARN. A pi/omp run that decodes no JSON event at all fails the stage even when
+the CLI exited 0 (`piStreamError`), because `omp --resume` can fall back to the
+interactive session picker; text is not required, so a terse agent still
+passes.
 
 ## 14. Config
 

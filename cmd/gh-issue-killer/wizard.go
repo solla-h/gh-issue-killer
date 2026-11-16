@@ -418,6 +418,11 @@ func listCodingAgentModels(codingAgent string) []string {
 			models = append(models, match[1])
 		}
 		return models
+	case "pi", "omp":
+		// Both list commands print human tables, not machine lists, so
+		// there is nothing reliable to offer here; the wizard falls back
+		// to "leave empty to use the CLI default".
+		return nil
 	}
 	return nil
 }

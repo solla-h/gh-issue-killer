@@ -15,7 +15,7 @@ var repoNameRe = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 // codingAgentIDs are the coding-agent CLIs the daemon can drive. The config
 // stores the stable ID, not a binary path, so it survives upgrades and PATH
 // changes.
-var codingAgentIDs = []string{"opencode", "claude", "codex"}
+var codingAgentIDs = []string{"opencode", "claude", "codex", "pi", "omp"}
 
 func isSupportedCodingAgent(id string) bool {
 	for _, candidate := range codingAgentIDs {

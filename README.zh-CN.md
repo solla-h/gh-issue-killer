@@ -4,7 +4,7 @@
 
 [English](README.md)
 
-监听 GitHub issue，让编码 agent（opencode、Claude Code 或 Codex）自己完成
+监听 GitHub issue，让编码 agent（opencode、Claude Code、Codex、Pi 或 Oh My Pi）自己完成
 计划 → 实现 → 测试 → 截图 → 开 PR → squash merge，全程由 issue 评论驱动。
 
 ## 工作流程
@@ -92,7 +92,7 @@ Linux 用 tar 包、Windows 用 zip）双击运行即可。窗口里就是同一
 
 ## 用编码 agent 安装
 
-把仓库交给 Claude Code、Codex 或 opencode，然后把下面这段贴进去：
+把仓库交给 Claude Code、Codex、opencode、Pi 或 Oh My Pi，然后把下面这段贴进去：
 
 ```text
 按照 DEPLOY.md 第 0–5 节在这台机器上部署 gh-issue-killer（除非我要求开机自启，
@@ -101,7 +101,7 @@ Linux 用 tar 包、Windows 用 zip）双击运行即可。窗口里就是同一
 默认值，不用确认：
 - 监控仓库：当前 checkout 的 origin remote；如果没有就问我一次
 - approver：`gh api user --jq .login` 得到的我的 GitHub 登录名
-- codingAgent：PATH 里第一个 opencode、claude、codex
+- codingAgent：PATH 里第一个 opencode、claude、codex、pi、omp
 - model：留空（CLI 默认）
 - proxy：设置了 $https_proxy 或 $ALL_PROXY 就用它，否则直连
 - 二进制：~/.local/bin/gh-issue-killer
