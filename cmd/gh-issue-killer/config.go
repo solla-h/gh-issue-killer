@@ -43,13 +43,13 @@ type RepoConfig struct {
 }
 
 // ReleaseConfig is the opt-in periodic release for one repository. Publishing
-// creates a public tag and release, so disabled is the default. BugBump and
-// FeatureBump name the version part to increment: patch, minor or major.
+// creates a public tag and release, so disabled is the default. The version
+// part follows the conventional-commit shape of the batch: a feature bumps the
+// minor part, everything else the patch part. A major release is a deliberate
+// human decision and is never chosen automatically.
 type ReleaseConfig struct {
 	Enabled      bool
 	IntervalDays int
-	BugBump      string
-	FeatureBump  string
 }
 
 type Config struct {
@@ -85,12 +85,12 @@ type repoOptions struct {
 }
 
 // releaseOptions mirrors ReleaseConfig in the config file. intervalDays is a
-// minimum gap between checks: the tick itself is hourly.
+// minimum gap between checks: the tick itself is hourly. Older configs may still
+// carry bugBump/featureBump; the decoder ignores them because the bump is
+// conventional.
 type releaseOptions struct {
-	Enabled      bool   `json:"enabled"`
-	IntervalDays int    `json:"intervalDays"`
-	BugBump      string `json:"bugBump"`
-	FeatureBump  string `json:"featureBump"`
+	Enabled      bool `json:"enabled"`
+	IntervalDays int  `json:"intervalDays"`
 }
 
 type rawConfig struct {
@@ -140,6 +140,12 @@ func normalizeRepos(raw json.RawMessage, defaults repoOptions) ([]RepoConfig, er
 			return nil, fmt.Errorf("config.repos is empty")
 		}
 		entries = make([]repoOptions, 0, len(names))
+		// Build the entries inside this branch: a failed unmarshal into
+		// []string still leaves a partially filled slice, so reading names
+		// afterwards would append an empty repo for every object entry.
+		for _, name := range names {
+			entries = append(entries, repoOptions{Repo: name})
+		}
 	} else {
 		var list []repoOptions
 		if err := json.Unmarshal(raw, &list); err == nil {
@@ -154,11 +160,6 @@ func normalizeRepos(raw json.RawMessage, defaults repoOptions) ([]RepoConfig, er
 				entries = append(entries, opts)
 			}
 			sortRepoOptions(entries)
-		}
-	}
-	if len(names) > 0 {
-		for _, name := range names {
-			entries = append(entries, repoOptions{Repo: name})
 		}
 	}
 	if len(entries) == 0 {
@@ -192,10 +193,7 @@ func normalizeRepos(raw json.RawMessage, defaults repoOptions) ([]RepoConfig, er
 		if len(approvers) == 0 {
 			approvers = []string{parts[0]}
 		}
-		release, err := normalizeRelease(entry.Release)
-		if err != nil {
-			return nil, fmt.Errorf("repo %s: %w", fullName, err)
-		}
+		release := normalizeRelease(entry.Release)
 		repos = append(repos, RepoConfig{
 			FullName:     fullName,
 			Owner:        parts[0],
@@ -211,31 +209,15 @@ func normalizeRepos(raw json.RawMessage, defaults repoOptions) ([]RepoConfig, er
 	return repos, nil
 }
 
-// normalizeRelease validates the optional per-repo release block and fills in
-// the defaults: one day between checks, patch for a bug and minor for a feature.
-func normalizeRelease(opts releaseOptions) (ReleaseConfig, error) {
-	cfg := ReleaseConfig{
-		Enabled:      opts.Enabled,
-		IntervalDays: opts.IntervalDays,
-		BugBump:      bumpPatch,
-		FeatureBump:  bumpMinor,
-	}
+// normalizeRelease fills in the optional per-repo release block. One day
+// between checks is the default; the bump part is not configurable because it
+// follows the conventional commits in the batch.
+func normalizeRelease(opts releaseOptions) ReleaseConfig {
+	cfg := ReleaseConfig{Enabled: opts.Enabled, IntervalDays: opts.IntervalDays}
 	if cfg.IntervalDays < 1 {
 		cfg.IntervalDays = 1
 	}
-	if raw := strings.ToLower(strings.TrimSpace(opts.BugBump)); raw != "" {
-		if !isBumpPart(raw) {
-			return cfg, fmt.Errorf("invalid release.bugBump %q (supported: %s)", opts.BugBump, bumpPartList())
-		}
-		cfg.BugBump = raw
-	}
-	if raw := strings.ToLower(strings.TrimSpace(opts.FeatureBump)); raw != "" {
-		if !isBumpPart(raw) {
-			return cfg, fmt.Errorf("invalid release.featureBump %q (supported: %s)", opts.FeatureBump, bumpPartList())
-		}
-		cfg.FeatureBump = raw
-	}
-	return cfg, nil
+	return cfg
 }
 
 func sortRepoOptions(entries []repoOptions) {
