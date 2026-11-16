@@ -806,16 +806,22 @@
 					<span>version <b class="font-medium text-foreground" data-testid="settings-version">{configVersion}</b></span>
 					<span>{updateStatus}</span>
 				</div>
-				<div class="flex flex-wrap items-center gap-2">
-					<Button variant="outline" disabled={busy === 'check-update'} onclick={checkUpdate}>
-						{t('settings.checkUpdate')}
-					</Button>
-					{#if update?.available}
-						<Button variant="default" disabled={busy === 'install-update'} onclick={installUpdate}>
-							{t('settings.installUpdate')}
+				{#if form.followMaster}
+					<p class="m-0 text-[10.5px] text-muted-foreground" data-testid="update-follow-master">
+						{t('settings.updateFollowMaster')}
+					</p>
+				{:else}
+					<div class="flex flex-wrap items-center gap-2">
+						<Button variant="outline" disabled={busy === 'check-update'} onclick={checkUpdate}>
+							{t('settings.checkUpdate')}
 						</Button>
-					{/if}
-				</div>
+						{#if update?.available}
+							<Button variant="default" disabled={busy === 'install-update'} onclick={installUpdate}>
+								{t('settings.installUpdate')}
+							</Button>
+						{/if}
+					</div>
+				{/if}
 			</div>
 		</div>
 	</div>

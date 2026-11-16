@@ -391,3 +391,28 @@ func TestWebSnapshotWithoutRouter(t *testing.T) {
 		t.Fatalf("configError = %q", snapshot.ConfigError)
 	}
 }
+
+func TestWebUpdateRefusesInstallWhileFollowingMaster(t *testing.T) {
+	web, _ := newConfigTestWeb(t)
+	web.cfg.FollowMaster = true
+	web.version = "v1.0.0"
+	web.latestRelease = func(context.Context) (*releaseInfo, error) {
+		return &releaseInfo{TagName: "v1.1.0", HTMLURL: "https://example.com"}, nil
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/update", strings.NewReader(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", "http://127.0.0.1:8787")
+	recorder := httptest.NewRecorder()
+	web.handleUpdate(recorder, request)
+
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", recorder.Code)
+	}
+	var payload updatePayload
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.FollowMaster || payload.Error == "" || payload.Installed {
+		t.Fatalf("payload = %+v", payload)
+	}
+}

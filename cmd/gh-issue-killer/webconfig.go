@@ -436,13 +436,14 @@ func (w *webServer) handleRestart(rw http.ResponseWriter, req *http.Request) {
 }
 
 type updatePayload struct {
-	Current   string `json:"current"`
-	Latest    string `json:"latest"`
-	Available bool   `json:"available"`
-	URL       string `json:"url"`
-	Notes     string `json:"notes"`
-	Installed bool   `json:"installed"`
-	Error     string `json:"error,omitempty"`
+	Current      string `json:"current"`
+	FollowMaster bool   `json:"followMaster"`
+	Latest       string `json:"latest"`
+	Available    bool   `json:"available"`
+	URL          string `json:"url"`
+	Notes        string `json:"notes"`
+	Installed    bool   `json:"installed"`
+	Error        string `json:"error,omitempty"`
 }
 
 // latestReleaseInfo lets tests replace the GitHub lookup.
@@ -466,7 +467,7 @@ func (w *webServer) handleUpdate(rw http.ResponseWriter, req *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(req.Context(), 10*time.Minute)
 	defer cancel()
-	payload := updatePayload{Current: w.version}
+	payload := updatePayload{Current: w.version, FollowMaster: w.cfg.FollowMaster}
 	rel, err := w.latestReleaseInfo(ctx)
 	if err != nil {
 		payload.Error = err.Error()
@@ -477,6 +478,12 @@ func (w *webServer) handleUpdate(rw http.ResponseWriter, req *http.Request) {
 	payload.URL = rel.HTMLURL
 	payload.Notes = rel.Body
 	payload.Available = isNewerVersion(rel.TagName, w.version)
+	if apply && w.cfg.FollowMaster {
+		// A manual release install would be replaced by the next master rebuild.
+		payload.Error = "followMaster is enabled: the daemon rebuilds from master, release installs are disabled"
+		w.writeJSON(rw, http.StatusConflict, payload)
+		return
+	}
 	if !apply || !payload.Available {
 		w.writeJSON(rw, http.StatusOK, payload)
 		return
