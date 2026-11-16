@@ -209,6 +209,11 @@ Other rules:
 - Closing an issue cancels the task and closes the PR; reopening resumes. A
   reopened `done` issue starts from `new`.
 - 👍 on the stored `PRCommentID` merges, but only while phase is `pr_open`.
+- Accepting an approval or merge moves the phase immediately (`awaiting_approval`
+  → `implementing`, `pr_open` → `merging`) before the job runs. The worker is
+  often busy with another task, and without this the dashboard kept showing
+  “waiting for confirmation” while the label already said working, and the
+  poller re-approved the same 👍 on every scan.
 - 👎 is ignored; 👍 on the review prompt comment (`ReviewCommentID`) means
   “apply this review”: the daemon rebuilds the instructions from the review body
   and its inline comments (`reviewInstructions`) and runs `doModifyPR` on the
@@ -527,6 +532,7 @@ keeps tests quiet. Notable coverage:
 | `review_test.go` | review command parsing, `review.json` loading, inline filtering, fallback body, review API payload |
 | `modifypr_test.go` | which PR heads can be pushed (same repo, fork with allow-edits-by-maintainers) |
 | `comment_edit_test.go` | edited comments are reprocessed, plain repeats stay deduped |
+| `approve_phase_test.go` | 👍 and merge move the phase as soon as they are accepted |
 | `messages_test.go` | scaffolding catalogs, `app.text` resolution, language detection |
 | `reactions_test.go` | polled 👍 on the review prompt (approver only, consumed once) |
 | `blocked_ci_test.go` | green-check detection, auto-resume of CI-blocked tasks, other reasons untouched |

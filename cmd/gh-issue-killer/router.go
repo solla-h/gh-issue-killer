@@ -728,10 +728,14 @@ func (r *Router) WebCancel(repo string, number int) error {
 
 func (r *Router) enqueueApprove(ctx context.Context, app *AppContext, fullName string, number int, sender string) {
 	key := fmt.Sprintf("%s#%d", fullName, number)
-	// The owner already approved: clear the waiting label now, even if the
-	// implementation is still queued behind another job. Otherwise the issue
-	// keeps looking like it needs confirmation.
+	// The owner already approved: clear the waiting label and move the phase
+	// now, even if the implementation is still queued behind another job.
+	// Otherwise the issue keeps looking like it needs confirmation and the
+	// poller keeps re-approving the same 👍 on every scan.
 	app.GH.SetAgentState(ctx, fullName, number, workingLabel)
+	app.Store.UpdateIssue(fullName, number, func(state *IssueState) {
+		state.Phase = "implementing"
+	})
 	trigger := Trigger{
 		Type:        "reaction",
 		IssueNumber: number,
@@ -748,7 +752,7 @@ func (r *Router) enqueueApprove(ctx context.Context, app *AppContext, fullName s
 			return
 		}
 		current := r.store.Issue(fullName, number)
-		if current.Phase != "awaiting_approval" {
+		if current.Phase != "implementing" {
 			return
 		}
 		doImplement(jobCtx, app, trigger, issue, current)
@@ -757,6 +761,11 @@ func (r *Router) enqueueApprove(ctx context.Context, app *AppContext, fullName s
 
 func (r *Router) enqueueMerge(app *AppContext, fullName string, number int, sender string) {
 	key := fmt.Sprintf("%s#%d", fullName, number)
+	// Move out of pr_open now: the merge may queue behind other work and the
+	// poller must not re-merge the same 👍 every 30 s.
+	app.Store.UpdateIssue(fullName, number, func(state *IssueState) {
+		state.Phase = "merging"
+	})
 	trigger := Trigger{
 		Type:        "reaction",
 		IssueNumber: number,
@@ -773,7 +782,7 @@ func (r *Router) enqueueMerge(app *AppContext, fullName string, number int, send
 			return
 		}
 		current := r.store.Issue(fullName, number)
-		if current.Phase != "pr_open" || current.PRNumber == 0 {
+		if current.Phase != "merging" || current.PRNumber == 0 {
 			return
 		}
 		r.waitCISettle(jobCtx, fullName, number)
@@ -983,6 +992,9 @@ func (r *Router) HandleTrigger(ctx context.Context, fullName string, trigger Tri
 
 		if command == "approve" && (st.Phase == "awaiting_approval" || st.Phase == "blocked") {
 			app.GH.SetAgentState(ctx, fullName, trigger.IssueNumber, workingLabel)
+			app.Store.UpdateIssue(fullName, trigger.IssueNumber, func(state *IssueState) {
+				state.Phase = "implementing"
+			})
 			r.enqueue(fullName, key, stageWork, func(jobCtx context.Context) {
 				issue, err := app.GH.GetIssue(jobCtx, fullName, trigger.IssueNumber)
 				if err != nil {
@@ -1067,6 +1079,9 @@ func (r *Router) HandleTrigger(ctx context.Context, fullName string, trigger Tri
 		if command == "" && mentioned && isApprover && (st.Phase == "awaiting_approval" || st.Phase == "blocked") {
 			if approved, notes := approvalWithNotes(trigger.CommentBody, r.agentLogin); approved {
 				app.GH.SetAgentState(ctx, fullName, trigger.IssueNumber, workingLabel)
+				app.Store.UpdateIssue(fullName, trigger.IssueNumber, func(state *IssueState) {
+					state.Phase = "implementing"
+				})
 				r.enqueue(fullName, key, stageWork, func(jobCtx context.Context) {
 					issue, err := app.GH.GetIssue(jobCtx, fullName, trigger.IssueNumber)
 					if err != nil {
