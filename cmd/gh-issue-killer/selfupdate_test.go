@@ -314,3 +314,18 @@ func TestInstallReleaseInstallsVerifiedAsset(t *testing.T) {
 		t.Fatal("staged file must not be left behind")
 	}
 }
+
+// A restart that was queued behind a long job can re-exec an older build; the
+// watcher must then see the newer master instead of adopting it as baseline.
+func TestMasterWatchBaselineUsesBuildCommit(t *testing.T) {
+	cases := []struct{ head, build, want string }{
+		{"bbb", "", "bbb"},
+		{"bbb", "aaa", "aaa"},
+		{"bbb", "bbb", "bbb"},
+	}
+	for _, c := range cases {
+		if got := masterWatchBaseline(c.head, c.build); got != c.want {
+			t.Fatalf("masterWatchBaseline(%q, %q) = %q, want %q", c.head, c.build, got, c.want)
+		}
+	}
+}

@@ -640,7 +640,10 @@ poll and a 500 ms debounce; invalid edits are ignored with a warning.
 `watchMaster` (`followMaster: true`) is the development counterpart of release
 updates: it polls `master` every 30 s, rebuilds in a dedicated clone under
 `$STATE/self` (frontend build included, `npm ci` only when the lockfile moves)
-and fires a restart; it takes precedence over `selfUpdate`. The
+and fires a restart; it takes precedence over `selfUpdate`. The watch baseline
+is the injected `main.commit`, not the remote head: a restart queued behind a
+long job re-execs whichever binary was built earlier, and seeding from the head
+would silently leave it one commit behind until the next push. The
 dashboard's PUT reuses the same loader and triggers the same reload, as do
 `/api/restart` and a finished update. Both end in `reexec`, so the pid and the
 lock stay valid; interrupted implementations resume from their worktree on the

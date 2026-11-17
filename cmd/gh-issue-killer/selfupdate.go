@@ -494,6 +494,18 @@ const (
 // the machine, because the dashboard is compiled from frontend/ into the binary.
 // The returned channel fires once after a successful rebuild; the caller waits
 // for idle jobs and re-execs.
+// masterWatchBaseline is the commit the watcher compares against. A queued
+// restart can re-exec a binary that was built before master moved again (the
+// restart waits for running jobs); seeding the watch from the remote head in
+// that case would treat the newer master as the baseline and never rebuild.
+// The injected build commit is authoritative when present.
+func masterWatchBaseline(head, buildCommit string) string {
+	if buildCommit == "" {
+		return head
+	}
+	return buildCommit
+}
+
 func watchMaster(ctx context.Context, log *Logger, env []string) <-chan struct{} {
 	ready := make(chan struct{}, 1)
 	go func() {
@@ -502,7 +514,7 @@ func watchMaster(ctx context.Context, log *Logger, env []string) <-chan struct{}
 			log.Warn("master update: cannot read %s from %s; disabled", masterBranch, masterRepoURL)
 			return
 		}
-		last := head
+		last := masterWatchBaseline(head, commit)
 		log.Debug("master update: watching %s at %s", masterBranch, shortSHA(head))
 		ticker := time.NewTicker(masterCheck)
 		defer ticker.Stop()
