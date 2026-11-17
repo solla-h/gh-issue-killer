@@ -410,7 +410,11 @@ func (r *Router) HandleReaction(ctx context.Context, fullName string, number int
 		return
 	}
 	st := r.store.Issue(fullName, number)
-	if st.StatusCommentID != 0 && st.StatusCommentID == commentID {
+	statusID := st.StatusCommentID
+	if statusID == 0 && st.Phase == "blocked" {
+		statusID = r.latestStatusCommentID(ctx, app, number)
+	}
+	if statusID != 0 && statusID == commentID {
 		if !isApproverLogin(reactor, app.Repo.Approvers) && !strings.EqualFold(reactor, r.agentLogin) {
 			r.log.Debug("ignore 👍 from non-approver @%s on %s#%d", reactor, fullName, number)
 			return
@@ -876,6 +880,24 @@ func (r *Router) enqueueMerge(app *AppContext, fullName string, number int, send
 	})
 }
 
+// latestStatusCommentID returns the newest comment the daemon wrote on the
+// issue. A blocked issue normally carries that id in the state, but state
+// written by an older build (or a crash between posting and saving) does not,
+// and the 👍 already sitting on that comment must still retry the task.
+func (r *Router) latestStatusCommentID(ctx context.Context, app *AppContext, number int) int64 {
+	comments, err := app.GH.ListComments(ctx, app.Repo.FullName, number)
+	if err != nil {
+		r.log.Debug("list comments for %s#%d: %v", app.Repo.FullName, number, err)
+		return 0
+	}
+	for i := len(comments) - 1; i >= 0; i-- {
+		if strings.Contains(comments[i].Body, agentCommentMarker) {
+			return comments[i].ID
+		}
+	}
+	return 0
+}
+
 // ackReaction answers an accepted 👍 with 👀 so the approver sees that the
 // daemon picked the reaction up immediately, before the work finishes.
 func (r *Router) ackReaction(ctx context.Context, app *AppContext, commentID int64) {
@@ -968,9 +990,18 @@ func (r *Router) checkReactions(ctx context.Context, app *AppContext) {
 				continue
 			}
 		}
-		if st.Phase == "blocked" && st.StatusCommentID != 0 {
-			if login, ok := r.commentThumbsUp(ctx, app, st.StatusCommentID); ok {
-				r.ackReaction(ctx, app, st.StatusCommentID)
+		if st.Phase == "blocked" {
+			statusID := st.StatusCommentID
+			if statusID == 0 {
+				statusID = r.latestStatusCommentID(ctx, app, issue.Number)
+				if statusID != 0 {
+					app.Store.UpdateIssue(app.Repo.FullName, issue.Number, func(state *IssueState) {
+						state.StatusCommentID = statusID
+					})
+				}
+			}
+			if login, ok := r.commentThumbsUp(ctx, app, statusID); ok {
+				r.ackReaction(ctx, app, statusID)
 				app.Store.UpdateIssue(app.Repo.FullName, issue.Number, func(state *IssueState) {
 					state.StatusCommentID = 0
 				})

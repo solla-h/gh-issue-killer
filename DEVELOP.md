@@ -252,7 +252,9 @@ Other rules:
   `Something went wrong`, `checks failed`, `CI blocked` and `merge failed`
   comments) retries the task exactly like `@agent continue`; the id is cleared
   when consumed so the poller cannot loop. This is what makes a blocked issue
-  recoverable without typing a command.
+  recoverable without typing a command. When the id is missing (state written by
+  an older build), the poller adopts the newest comment carrying
+  `<!-- ghik:agent -->` before checking it.
 - Every accepted 👍 is acknowledged with an 👀 reaction on that comment
   (`ackReaction`) before the job runs. The job may queue behind another task,
   and without the ack the approver cannot tell the reaction was seen.

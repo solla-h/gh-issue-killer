@@ -119,3 +119,61 @@ func TestReactionOnPlanAcknowledgesWithEyes(t *testing.T) {
 		t.Fatalf("plan approval was not acknowledged: %+v", calls.snapshot())
 	}
 }
+
+// State written by an older build has no statusCommentId. The poller must still
+// find the bot's last message, adopt the 👍 that is already on it and retry.
+func TestCheckReactionsAdoptsUntrackedStatusComment(t *testing.T) {
+	store := &Store{file: filepath.Join(t.TempDir(), "state.json"), state: State{Version: 1, Repos: map[string]*RepoState{}}}
+	store.UpdateIssue("acme/app", 5, func(st *IssueState) {
+		st.Phase = "blocked"
+		st.BlockedReason = "revision failed: coding agent timed out"
+	})
+	gh, calls := newFakeAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/repos/acme/app/issues":
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"number": 5, "state": "open"}})
+		case strings.HasSuffix(r.URL.Path, "/issues/5/comments"):
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"id": 900, "body": "### 🤖 Something went wrong\n\n<!-- ghik:agent -->"},
+			})
+		case strings.Contains(r.URL.Path, "/issues/comments/900/reactions"):
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"content": "+1", "user": map[string]string{"login": "owner"}},
+			})
+		case strings.Contains(r.URL.Path, "/issues/comments/") && strings.HasSuffix(r.URL.Path, "/reactions"):
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
+		case strings.Contains(r.URL.Path, "/issues/5"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"state": "closed"})
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	})
+	app := &AppContext{
+		Repo:  RepoConfig{FullName: "acme/app", Approvers: []string{"owner"}},
+		GH:    gh,
+		Store: store,
+		Log:   NewSilentLogger(),
+	}
+	router := NewRouter(&Config{PlanParallel: 1, ImplementParallel: 1},
+		map[string]*AppContext{"acme/app": app}, "bot", store, NewSilentLogger())
+
+	router.checkReactions(context.Background(), app)
+
+	state := store.Issue("acme/app", 5)
+	if state.Phase != "implementing" {
+		t.Fatalf("phase = %q, want implementing (retry queued)", state.Phase)
+	}
+	if state.StatusCommentID != 0 {
+		t.Fatalf("StatusCommentID = %d, want consumed", state.StatusCommentID)
+	}
+	eyes := false
+	for _, call := range calls.snapshot() {
+		if call.method == http.MethodPost && strings.HasSuffix(call.path, "/comments/900/reactions") &&
+			strings.Contains(call.body, "eyes") {
+			eyes = true
+		}
+	}
+	if !eyes {
+		t.Fatalf("no 👀 acknowledgment was posted: %+v", calls.snapshot())
+	}
+}
