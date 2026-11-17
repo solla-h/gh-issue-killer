@@ -371,18 +371,19 @@ func main() {
 	for _, repo := range cfg.Repos {
 		info, err := gh.GetRepo(ctx, repo.FullName)
 		if err != nil {
-			log.Error("repo %s: %v", repo.FullName, err)
-			cancel()
-			os.Exit(1)
+			// A typo, a deleted repository or a missing collaborator invite must
+			// not take the whole daemon down: skip it and keep the other repos
+			// running. The dashboard can then fix config.json.
+			log.Warn("repo %s: %v (skipping; fix config.json or grant the token access)", repo.FullName, err)
+			continue
 		}
 		if !info.Permissions.Push {
 			log.Warn("%s: the GitHub token has no push access; PRs/merges will fail", repo.FullName)
 		}
 		local, err := resolveRepo(ctx, repo, info, identity, token, proxy)
 		if err != nil {
-			log.Error("repo %s: %v", repo.FullName, err)
-			cancel()
-			os.Exit(1)
+			log.Warn("repo %s: %v (skipping)", repo.FullName, err)
+			continue
 		}
 		gh.EnsureLabels(ctx, repo.FullName)
 
@@ -415,6 +416,9 @@ func main() {
 	if err != nil {
 		log.Error("state: %v", err)
 		os.Exit(1)
+	}
+	if len(contexts) == 0 {
+		log.Error("no usable repositories; fix config.json from the dashboard")
 	}
 	for _, app := range contexts {
 		app.Store = store
