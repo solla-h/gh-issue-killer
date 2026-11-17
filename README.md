@@ -182,6 +182,10 @@ Open an issue that mentions the bot (or assign it to the bot). Then:
 | 👍 on the plan comment | same as `@agent lgtm` |
 | 👍 on the PR-announcement comment | same as `@agent 合并` |
 | 👍 on the bot's “Review 已提交” comment | apply that review's findings to the PR (edit + push) |
+| 👍 on the bot's “Something went wrong” / blocked comment | retry the blocked task (same as `@agent continue`) |
+
+Every accepted 👍 gets an 👀 reaction immediately, so you can see the daemon
+picked it up while the work is still running.
 
 Commands must come from an approver, mention the agent, and be the **whole
 comment**. Approval words, status labels and review rules live in

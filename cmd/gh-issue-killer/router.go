@@ -410,6 +410,24 @@ func (r *Router) HandleReaction(ctx context.Context, fullName string, number int
 		return
 	}
 	st := r.store.Issue(fullName, number)
+	if st.StatusCommentID != 0 && st.StatusCommentID == commentID {
+		if !isApproverLogin(reactor, app.Repo.Approvers) && !strings.EqualFold(reactor, r.agentLogin) {
+			r.log.Debug("ignore 👍 from non-approver @%s on %s#%d", reactor, fullName, number)
+			return
+		}
+		login, ok := r.commentThumbsUp(ctx, app, commentID)
+		if !ok {
+			r.log.Debug("👍 from @%s not on comment %d yet", reactor, commentID)
+			return
+		}
+		r.ackReaction(ctx, app, commentID)
+		app.Store.UpdateIssue(fullName, number, func(state *IssueState) {
+			state.StatusCommentID = 0
+		})
+		r.log.Info("retry accepted by 👍 from @%s on %s#%d", login, fullName, number)
+		r.enqueueApprove(ctx, app, fullName, number, login)
+		return
+	}
 	if st.ReviewCommentID != 0 && st.ReviewCommentID == commentID {
 		if !isApproverLogin(reactor, app.Repo.Approvers) && !strings.EqualFold(reactor, r.agentLogin) {
 			r.log.Debug("ignore 👍 from non-approver @%s on %s#%d", reactor, fullName, number)
@@ -420,6 +438,7 @@ func (r *Router) HandleReaction(ctx context.Context, fullName string, number int
 			r.log.Debug("👍 from @%s not on comment %d yet", reactor, commentID)
 			return
 		}
+		r.ackReaction(ctx, app, commentID)
 		r.log.Info("review accepted by 👍 from @%s on %s#%d; applying the findings", login, fullName, number)
 		r.enqueueReviewFix(ctx, app, fullName, number, login)
 		return
@@ -439,9 +458,11 @@ func (r *Router) HandleReaction(ctx context.Context, fullName string, number int
 	}
 	switch {
 	case st.Phase == "awaiting_approval" && st.PlanCommentID == commentID:
+		r.ackReaction(ctx, app, commentID)
 		r.log.Info("plan approved by 👍 from @%s on %s#%d", login, fullName, number)
 		r.enqueueApprove(ctx, app, fullName, number, login)
 	case st.Phase == "pr_open" && st.PRCommentID == commentID:
+		r.ackReaction(ctx, app, commentID)
 		r.log.Info("merge approved by 👍 from @%s on %s#%d", login, fullName, number)
 		r.enqueueMerge(app, fullName, number, login)
 	default:
@@ -855,6 +876,14 @@ func (r *Router) enqueueMerge(app *AppContext, fullName string, number int, send
 	})
 }
 
+// ackReaction answers an accepted 👍 with 👀 so the approver sees that the
+// daemon picked the reaction up immediately, before the work finishes.
+func (r *Router) ackReaction(ctx context.Context, app *AppContext, commentID int64) {
+	if err := app.GH.ReactComment(ctx, app.Repo.FullName, commentID, "eyes"); err != nil {
+		r.log.Debug("ack 👍 on comment %d: %v", commentID, err)
+	}
+}
+
 // shouldSkipComment de-duplicates comment deliveries, except when the event is
 // an edit that must be reconsidered.
 func (r *Router) shouldSkipComment(fullName string, trigger Trigger) bool {
@@ -933,19 +962,33 @@ func (r *Router) checkReactions(ctx context.Context, app *AppContext) {
 		// always delivered, so check the review prompt on every scan.
 		if st.ReviewCommentID != 0 {
 			if login, ok := r.commentThumbsUp(ctx, app, st.ReviewCommentID); ok {
+				r.ackReaction(ctx, app, st.ReviewCommentID)
 				r.log.Info("review accepted by 👍 from @%s on %s#%d (poll)", login, app.Repo.FullName, issue.Number)
 				r.enqueueReviewFix(ctx, app, app.Repo.FullName, issue.Number, login)
+				continue
+			}
+		}
+		if st.Phase == "blocked" && st.StatusCommentID != 0 {
+			if login, ok := r.commentThumbsUp(ctx, app, st.StatusCommentID); ok {
+				r.ackReaction(ctx, app, st.StatusCommentID)
+				app.Store.UpdateIssue(app.Repo.FullName, issue.Number, func(state *IssueState) {
+					state.StatusCommentID = 0
+				})
+				r.log.Info("retry accepted by 👍 from @%s on %s#%d (poll)", login, app.Repo.FullName, issue.Number)
+				r.enqueueApprove(ctx, app, app.Repo.FullName, issue.Number, login)
 				continue
 			}
 		}
 		switch st.Phase {
 		case "awaiting_approval":
 			if login, ok := r.commentThumbsUp(ctx, app, st.PlanCommentID); ok {
+				r.ackReaction(ctx, app, st.PlanCommentID)
 				r.log.Info("plan approved by 👍 from @%s on %s#%d (poll)", login, app.Repo.FullName, issue.Number)
 				r.enqueueApprove(ctx, app, app.Repo.FullName, issue.Number, login)
 			}
 		case "pr_open":
 			if login, ok := r.commentThumbsUp(ctx, app, st.PRCommentID); ok {
+				r.ackReaction(ctx, app, st.PRCommentID)
 				r.log.Info("merge approved by 👍 from @%s on %s#%d (poll)", login, app.Repo.FullName, issue.Number)
 				r.enqueueMerge(app, app.Repo.FullName, issue.Number, login)
 			}

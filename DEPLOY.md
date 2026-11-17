@@ -499,6 +499,7 @@ Interrupted implementations resume from their worktree on the next start.
 | checks failed, issue `blocked` | inspect `$STATE/runs/<owner>-<repo>/issue-<n>/checks/`; fix in the kept worktree, then `@agent continue` |
 | new issue produces nothing | issue must @ the bot or assign it; the author must not be the bot |
 | 👍 on the plan does nothing | reaction must be on the plan comment by an approver; the poll checks every 30 s |
+| 👍 on a blocked comment does nothing | the 👍 must be on the latest `Something went wrong` / blocked message and come from an approver; older status comments are forgotten |
 | stale `agent:*` labels | only `agent:awaiting-approval` is still managed; delete the leftover old labels by hand in the repo settings |
 | `already running (pid N)` | use `-status` / `-stop`; never start a second instance |
 | desktop window says the engine exited | read `~/.gh-issue-killer/logs/desktop-engine.log`; the usual cause is a daemon (or a second desktop) already holding `daemon.lock` |
@@ -540,6 +541,11 @@ the GitHub API before a command, author or body is trusted, so the relay can
 never forge one. Hook failures fall back to polling. Reactions on comments
 (👍) and review comments/review bodies are also polled from the API, because
 GitHub does not always deliver those events.
+
+**Status comments.** Every “needs you” message (`Something went wrong`, `checks
+failed`, `CI blocked`, `merge failed`) is stored as `statusCommentId`; an
+approver's 👍 on it retries the task and gets an 👀 ack. `@agent continue` does
+the same thing.
 
 **Worktrees.** Each watched repo has a managed clone at
 `$STATE/repos/<owner>-<repo>`; `git fetch` runs before every plan and

@@ -155,6 +155,9 @@ go build -o bin/gh-issue-killer ./cmd/gh-issue-killer
 | plan 评论上的 👍 | 等同 `@agent lgtm` |
 | PR 公告评论上的 👍 | 等同 `@agent 合并` |
 | bot 那条「Review 已提交」评论上的 👍 | 按这条 review 的意见直接改 PR 并推送 |
+| bot 那条「出错了 / 被阻塞」评论上的 👍 | 重试被阻塞的任务（等同 `@agent continue`） |
+
+每个被接受的 👍 都会立刻收到一个 👀 回应，任务还在排队或执行时也能看到已经收到。
 
 命令必须来自 approver、@ 了 agent，并且**整条评论就是命令**。批准词、状态标签
 和 review 的完整规则见 [DEPLOY.md](DEPLOY.md) 和 [DEVELOP.md](DEVELOP.md)。

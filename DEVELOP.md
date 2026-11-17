@@ -176,7 +176,8 @@ dependencies.
 `IssueState` (`state.go`) is keyed by issue number inside
 `Repos[fullName].Issues["<n>"]`. Important fields: `Phase`, `Plan`,
 `SessionID` (coding-agent session), `Branch`, `Worktree`, `PRNumber`, `PRURL`,
-`PRCommentID` (the 👍 target), `Checks`, `Screenshots`, `BlockedReason`,
+`PRCommentID` (the 👍 target), `StatusCommentID` (the last “needs you”
+comment, also a 👍 target), `Checks`, `Screenshots`, `BlockedReason`,
 `ProcessedComments`/`ProcessedFeedback`, `MergedAt`/`CancelledAt`.
 
 | phase | meaning | who sets it |
@@ -247,6 +248,14 @@ Other rules:
   often busy with another task, and without this the dashboard kept showing
   “waiting for confirmation” while the label already said working, and the
   poller re-approved the same 👍 on every scan.
+- A 👍 on the last “needs you” message (`StatusCommentID`: the
+  `Something went wrong`, `checks failed`, `CI blocked` and `merge failed`
+  comments) retries the task exactly like `@agent continue`; the id is cleared
+  when consumed so the poller cannot loop. This is what makes a blocked issue
+  recoverable without typing a command.
+- Every accepted 👍 is acknowledged with an 👀 reaction on that comment
+  (`ackReaction`) before the job runs. The job may queue behind another task,
+  and without the ack the approver cannot tell the reaction was seen.
 - 👎 is ignored; 👍 on the review prompt comment (`ReviewCommentID`) means
   “apply this review”: the daemon rebuilds the instructions from the review body
   and its inline comments (`reviewInstructions`) and runs `doModifyPR` on the
@@ -255,7 +264,8 @@ Other rules:
   id is cleared when consumed, so the poller does not restart the fix on every
   scan.
 - Reaction events are not always delivered, so `checkReactions` (30 s poller)
-  re-checks 👍 on the plan comment, the PR announcement and the review prompt;
+  re-checks 👍 on the plan comment, the PR announcement, the review prompt and
+  a blocked task's status comment;
   reviewed PRs are not in a task phase, so the review check runs for any open
   issue with a stored `ReviewCommentID`.
 
@@ -682,6 +692,7 @@ keeps tests quiet. Notable coverage:
 | `approve_phase_test.go` | 👍 and merge move the phase as soon as they are accepted |
 | `messages_test.go` | scaffolding catalogs, `app.text` resolution, language detection |
 | `reactions_test.go` | polled 👍 on the review prompt (approver only, consumed once) |
+| `reaction_ack_test.go` | 👀 acknowledgment, status comment id remembered, 👍 on it retries |
 | `blocked_ci_test.go` | green-check detection, auto-resume of CI-blocked tasks, other reasons untouched |
 | `router_ci_test.go` | the CI queue does not block work; cancel stops CI jobs |
 | `gh_test.go` | label transitions and GitHub helpers |

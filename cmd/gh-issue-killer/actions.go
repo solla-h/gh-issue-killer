@@ -493,7 +493,7 @@ func reportCheckFailures(ctx context.Context, app *AppContext, number int, workt
 		"",
 		fmt.Sprintf(app.text(number, "checks_failed.hint"), worktree, app.AgentLogin),
 	}, "\n")
-	_, _ = app.GH.PostComment(ctx, app.Repo.FullName, number, body)
+	postStatusComment(ctx, app, number, body)
 	app.Store.UpdateIssue(app.Repo.FullName, number, func(state *IssueState) {
 		state.Phase = "blocked"
 		state.BlockedReason = "checks failed"
@@ -1189,7 +1189,7 @@ func doMergePR(ctx context.Context, app *AppContext, trigger Trigger, pr PullReq
 		if !skipConflictCheck && mergeBlockedByConflicts(pr) {
 			if rounds >= app.Cfg.MaxFixRounds {
 				reason := fmt.Sprintf(app.text(number, "conflict.blocked"), app.Local.Base, rounds)
-				_, _ = app.GH.PostComment(ctx, app.Repo.FullName, number,
+				postStatusComment(ctx, app, number,
 					fmt.Sprintf("%s\n\n%s\n\n%s", app.text(number, "merge.failed.title"), reason, app.text(number, "conflict.blocked_hint")))
 				return
 			}
@@ -1208,7 +1208,7 @@ func doMergePR(ctx context.Context, app *AppContext, trigger Trigger, pr PullReq
 		}
 		skipConflictCheck = false
 		if verdict := waitForChecks(ctx, app, pr.Head.SHA, pr.Base.Ref, 10*time.Minute); !verdict.OK {
-			_, _ = app.GH.PostComment(ctx, app.Repo.FullName, number,
+			postStatusComment(ctx, app, number,
 				fmt.Sprintf("%s\n\n%s\n\n- %s\n\n%s", app.text(number, "ci.blocked.title"),
 					app.text(number, "ci.blocked.body"), verdict.Note, app.text(number, "ci.blocked.hint")))
 			return
@@ -1239,7 +1239,7 @@ func doMergePR(ctx context.Context, app *AppContext, trigger Trigger, pr PullReq
 		if mergeErr != nil {
 			detail = mergeErr.Error()
 		}
-		_, _ = app.GH.PostComment(ctx, app.Repo.FullName, number,
+		postStatusComment(ctx, app, number,
 			fmt.Sprintf("%s\n\n```\n%s\n```\n\n%s", app.text(number, "merge.failed.title"), sanitize(detail), app.text(number, "merge.failed.hint")))
 		return
 	}
@@ -1710,7 +1710,7 @@ func settleCIGate(ctx context.Context, app *AppContext, issue Issue, pr PullRequ
 		state.BlockedByCI = true
 	})
 	app.GH.SetAgentState(ctx, app.Repo.FullName, number, awaitingLabel)
-	_, _ = app.GH.PostComment(ctx, app.Repo.FullName, number, strings.Join([]string{
+	postStatusComment(ctx, app, number, strings.Join([]string{
 		app.text(number, "ci.blocked.title"),
 		"",
 		"- " + reason,
@@ -2406,6 +2406,19 @@ func doCancel(ctx context.Context, app *AppContext, trigger Trigger, issue Issue
 	app.GH.SetAgentState(ctx, app.Repo.FullName, number, "")
 }
 
+// postStatusComment posts a "needs you" message and remembers it, so a 👍 on it
+// retries the task.
+func postStatusComment(ctx context.Context, app *AppContext, number int, body string) {
+	posted, err := app.GH.PostComment(ctx, app.Repo.FullName, number, body)
+	if err != nil {
+		app.Log.Warn("post status comment for %s#%d: %v", app.Repo.FullName, number, err)
+		return
+	}
+	app.Store.UpdateIssue(app.Repo.FullName, number, func(state *IssueState) {
+		state.StatusCommentID = posted.ID
+	})
+}
+
 func blockIssue(ctx context.Context, app *AppContext, number int, err error) {
 	if issueCancelled(app, number) {
 		app.Log.Debug("suppress error for cancelled %s#%d: %v", app.Repo.FullName, number, err)
@@ -2419,7 +2432,7 @@ func blockIssue(ctx context.Context, app *AppContext, number int, err error) {
 		state.BlockedByCI = false
 	})
 	app.GH.SetAgentState(ctx, app.Repo.FullName, number, awaitingLabel)
-	_, _ = app.GH.PostComment(ctx, app.Repo.FullName, number,
+	postStatusComment(ctx, app, number,
 		fmt.Sprintf("%s\n\n```\n%s\n```\n\n%s", app.text(number, "error.title"), tailString(message, 12),
 			fmt.Sprintf(app.text(number, "error.hint"), app.AgentLogin)))
 }
