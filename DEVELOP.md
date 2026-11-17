@@ -169,7 +169,7 @@ dependencies.
 | `assets/sponsor.png` | WeChat reward QR code shown at the end of `README.zh-CN.md` (not part of the build) |
 | `desktop/` | separate Go module: Wails 3 shell (`main.go`, `engine.go`, `process_*.go`) and `build/` packaging (icon rendered from `frontend/static/logo.svg`, `.app`, DMG) |
 | `.agents/skills/modern-web-guidance/`, `skills-lock.json` | vendored GoogleChrome modern-web-guidance skill (SKILL.md + `guides/`) and its pinned commit, Apache-2.0 / CC-BY-4.0; search it before changing dashboard CSS, layout, tables, dialogs or theme handling |
-| `frontend/` | SvelteKit SPA for the dashboard: Tailwind v4 + shadcn-svelte tokens, zh/en strings, routes and `$lib` API/i18n/theme modules (`dialog.ts` wraps native dialogs and the light-dismiss fallback); `npm run build` writes `cmd/gh-issue-killer/web/dist` |
+| `frontend/` | SvelteKit SPA for the dashboard: Tailwind v4 + shadcn-svelte tokens, zh/en strings, routes and `$lib` API/i18n/theme/layout modules (`dialog.ts` wraps native dialogs and the light-dismiss fallback); `npm run build` writes `cmd/gh-issue-killer/web/dist` |
 
 ## 5. State model and phases
 
@@ -583,18 +583,33 @@ to `index.html` for unknown non-asset paths. A missing `/assets/*` file is a
 the server returns a page that explains how to build the frontend.
 
 The layout is intentionally a two-row sticky masthead above a board: brand and
-primary actions (settings, GitHub, language, theme) on the first row, the live
-counters on the second. Version, pid, identity, transport and the config path
+primary actions on the first row, the live counters on the second. The
+right-hand toolbar is a compact icon group: the GitHub link carries the
+repository's star count, then hairline dividers separate the settings, language
+and theme buttons. The icons stay visible at every width (the language button
+also shows `中`/`EN`), and the row wraps instead of overflowing on narrow
+screens. The star count comes from one anonymous `api.github.com` request
+(`stargazers_count`), cached in `localStorage` under `ghik-stars` for 24 hours;
+a stale count is shown while it refreshes, and a failed or rate-limited request
+leaves the GitHub icon alone. `formatStars` keeps counts below 1000 exact and
+compacts the rest (`9.3k`). The layout button (`gallery-horizontal`,
+`localStorage` key `ghik-layout`) mirrors shadcn-svelte's "Toggle layout": it
+flips the shell between the full 1600px board and a centred 1100px column.
+`app.css` keeps that width in `--page-max` and `.page-shell` is the single
+container class used by the masthead rows, the board, the LINES band and the
+console, so all of them move together. Version, pid, identity, transport and the
+config path
 moved into the settings dialog's System card so the header stays quiet. The
 masthead switches between Chinese (default) and English (`localStorage` key
-`ghik-lang`) and links to the project on GitHub. The theme toggle (`ghik-theme`)
-offers auto/light/dark: `auto` follows
-`prefers-color-scheme`; `theme.svelte.ts` flips the `.dark` class and the
-`<meta name="color-scheme">` hint together. `app.css` declares the palette once
-with `light-dark()` and switches `color-scheme` on `<html>`, so a token has a
-single definition and native controls (scrollbars, checkboxes) follow the same
-theme. Without JS a `prefers-color-scheme` fallback still picks the dark
-scheme. Every external link goes through `openExternal`: a normal browser gets
+`ghik-lang`) and links to the project on GitHub. The theme button (`ghik-theme`)
+cycles auto → light → dark and its icon and label follow the current mode:
+`auto` follows `prefers-color-scheme`; `theme.svelte.ts` flips the `.dark` class
+and the `<meta name="color-scheme">` hint together. `app.css` declares the
+palette once with `light-dark()` and switches `color-scheme` on `<html>`, so a
+token has a single definition and native controls (scrollbars, checkboxes)
+follow the same theme. Without JS a `prefers-color-scheme` fallback still picks
+the dark scheme. Every external link goes through `openExternal`: a normal
+browser gets
 `window.open`, while the desktop shell loads the page with `?surface=desktop`
 and the click is posted to `/api/open-url`, because Wails' WKWebView drops
 `target="_blank"`. Every string, including phases, filters, the drawer, the
@@ -723,7 +738,9 @@ phase transition, or a scheduler invariant. `go test ./...` and `go vet ./...`
 must stay clean; `gofmt -l .` must print nothing.
 
 The dashboard is tested with its own toolchain: `npm --prefix frontend run check`
-(svelte-check) and `npm --prefix frontend run build`. Before changing styles,
+(svelte-check), `npm --prefix frontend run test` (Node's test runner against
+`frontend/src/lib/utils.test.ts` for the pure helpers such as `formatStars`) and
+`npm --prefix frontend run build`. Before changing styles,
 layout, tables, dialogs or theme handling, search the vendored
 `.agents/skills/modern-web-guidance/` skill (for example
 `npx -y modern-web-guidance@latest search "responsive data table"` then
