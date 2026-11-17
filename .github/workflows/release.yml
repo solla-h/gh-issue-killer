@@ -159,6 +159,11 @@ jobs:
       - name: publish
         env:
           GH_TOKEN: ${{ github.token }}
+          # This job has no checkout, so gh cannot infer the repository from a
+          # git remote and every release command fails with "fatal: not a git
+          # repository". v0.3.0 built all archives and then published nothing
+          # for that reason.
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           # The release may already exist: the dashboard can create one (with
