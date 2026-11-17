@@ -500,6 +500,7 @@ Interrupted implementations resume from their worktree on the next start.
 | new issue produces nothing | issue must @ the bot or assign it; the author must not be the bot |
 | 👍 on the plan does nothing | reaction must be on the plan comment by an approver; the poll checks every 30 s |
 | 👍 on a blocked comment does nothing | the 👍 must be on the latest `Something went wrong` / blocked message and come from an approver; older status comments are forgotten |
+| every poll fails with `API rate limit exceeded` | the token burned its 5000/h core quota; polls and reactions stay blind until the window resets (`gh api rate_limit`). Check for repeated daemon starts (each runs a startup scan) |
 | stale `agent:*` labels | only `agent:awaiting-approval` is still managed; delete the leftover old labels by hand in the repo settings |
 | `already running (pid N)` | use `-status` / `-stop`; never start a second instance |
 | desktop window says the engine exited | read `~/.gh-issue-killer/logs/desktop-engine.log`; the usual cause is a daemon (or a second desktop) already holding `daemon.lock` |

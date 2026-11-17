@@ -521,12 +521,9 @@ func (r *Router) enqueueReviewFix(ctx context.Context, app *AppContext, fullName
 // failed, once those checks are green. Other blocked reasons (local checks, an
 // unreproducible bug, exhausted conflict rounds) stay parked for the user.
 func (r *Router) retryBlockedCI(ctx context.Context, app *AppContext) {
-	issues, err := app.GH.ListIssues(ctx, app.Repo.FullName, "open", nil)
-	if err != nil {
-		return
-	}
-	for _, issue := range issues {
-		number := issue.Number
+	// Same reason as checkReactions: only a tracked, CI-blocked issue can be
+	// resumed, so the scan starts from the state instead of listing the repo.
+	for _, number := range app.Store.IssueNumbers(app.Repo.FullName) {
 		st := r.store.Issue(app.Repo.FullName, number)
 		if st.Phase != "blocked" || !st.BlockedByCI || st.PRNumber == 0 {
 			continue
@@ -939,18 +936,14 @@ func (r *Router) commentThumbsUp(ctx context.Context, app *AppContext, commentID
 // checkPRFeedback is the polling fallback for inline review comments and
 // review bodies, because GitHub's review webhooks are not always delivered.
 func (r *Router) checkPRFeedback(ctx context.Context, app *AppContext) {
-	issues, err := app.GH.ListIssues(ctx, app.Repo.FullName, "open", nil)
-	if err != nil {
-		return
-	}
-	for _, issue := range issues {
-		st := r.store.Issue(app.Repo.FullName, issue.Number)
+	for _, number := range app.Store.IssueNumbers(app.Repo.FullName) {
+		st := r.store.Issue(app.Repo.FullName, number)
 		if st.Phase != "pr_open" || st.PRNumber == 0 {
 			continue
 		}
 		if comments, err := app.GH.ListReviewComments(ctx, app.Repo.FullName, st.PRNumber); err == nil {
 			for _, comment := range comments {
-				if r.store.IsFeedbackProcessed(app.Repo.FullName, issue.Number, comment.ID) {
+				if r.store.IsFeedbackProcessed(app.Repo.FullName, number, comment.ID) {
 					continue
 				}
 				r.HandlePRReviewComment(ctx, app.Repo.FullName, st.PRNumber, comment)
@@ -961,7 +954,7 @@ func (r *Router) checkPRFeedback(ctx context.Context, app *AppContext) {
 				if strings.TrimSpace(review.Body) == "" || review.State == "PENDING" {
 					continue
 				}
-				if r.store.IsFeedbackProcessed(app.Repo.FullName, issue.Number, review.ID) {
+				if r.store.IsFeedbackProcessed(app.Repo.FullName, number, review.ID) {
 					continue
 				}
 				r.HandlePRReview(ctx, app.Repo.FullName, st.PRNumber, review)
@@ -971,42 +964,39 @@ func (r *Router) checkPRFeedback(ctx context.Context, app *AppContext) {
 }
 
 func (r *Router) checkReactions(ctx context.Context, app *AppContext) {
-	// Pull requests are included: a review prompt is addressed to the PR, not to
-	// an issue, and the plain ListIssues filter would hide it.
-	issues, err := app.GH.ListIssuesAndPRs(ctx, app.Repo.FullName, "open", nil)
-	if err != nil {
-		r.log.Debug("scan awaiting issues: %v", err)
-		return
-	}
-	for _, issue := range issues {
-		st := r.store.Issue(app.Repo.FullName, issue.Number)
+	// Only tracked issues can carry a reaction target, so walk the state instead
+	// of listing every open issue. The listing itself was the daemon's biggest
+	// API consumer: 7 repos x all open issues x every 30 s exhausted the token's
+	// hourly quota, and a rate-limited poller cannot see a 👍 at all.
+	for _, number := range app.Store.IssueNumbers(app.Repo.FullName) {
+		st := r.store.Issue(app.Repo.FullName, number)
 		// A reviewed PR is not in a task phase, and the reaction webhook is not
 		// always delivered, so check the review prompt on every scan.
 		if st.ReviewCommentID != 0 {
 			if login, ok := r.commentThumbsUp(ctx, app, st.ReviewCommentID); ok {
 				r.ackReaction(ctx, app, st.ReviewCommentID)
-				r.log.Info("review accepted by 👍 from @%s on %s#%d (poll)", login, app.Repo.FullName, issue.Number)
-				r.enqueueReviewFix(ctx, app, app.Repo.FullName, issue.Number, login)
+				r.log.Info("review accepted by 👍 from @%s on %s#%d (poll)", login, app.Repo.FullName, number)
+				r.enqueueReviewFix(ctx, app, app.Repo.FullName, number, login)
 				continue
 			}
 		}
 		if st.Phase == "blocked" {
 			statusID := st.StatusCommentID
 			if statusID == 0 {
-				statusID = r.latestStatusCommentID(ctx, app, issue.Number)
+				statusID = r.latestStatusCommentID(ctx, app, number)
 				if statusID != 0 {
-					app.Store.UpdateIssue(app.Repo.FullName, issue.Number, func(state *IssueState) {
+					app.Store.UpdateIssue(app.Repo.FullName, number, func(state *IssueState) {
 						state.StatusCommentID = statusID
 					})
 				}
 			}
 			if login, ok := r.commentThumbsUp(ctx, app, statusID); ok {
 				r.ackReaction(ctx, app, statusID)
-				app.Store.UpdateIssue(app.Repo.FullName, issue.Number, func(state *IssueState) {
+				app.Store.UpdateIssue(app.Repo.FullName, number, func(state *IssueState) {
 					state.StatusCommentID = 0
 				})
-				r.log.Info("retry accepted by 👍 from @%s on %s#%d (poll)", login, app.Repo.FullName, issue.Number)
-				r.enqueueApprove(ctx, app, app.Repo.FullName, issue.Number, login)
+				r.log.Info("retry accepted by 👍 from @%s on %s#%d (poll)", login, app.Repo.FullName, number)
+				r.enqueueApprove(ctx, app, app.Repo.FullName, number, login)
 				continue
 			}
 		}
@@ -1014,14 +1004,14 @@ func (r *Router) checkReactions(ctx context.Context, app *AppContext) {
 		case "awaiting_approval":
 			if login, ok := r.commentThumbsUp(ctx, app, st.PlanCommentID); ok {
 				r.ackReaction(ctx, app, st.PlanCommentID)
-				r.log.Info("plan approved by 👍 from @%s on %s#%d (poll)", login, app.Repo.FullName, issue.Number)
-				r.enqueueApprove(ctx, app, app.Repo.FullName, issue.Number, login)
+				r.log.Info("plan approved by 👍 from @%s on %s#%d (poll)", login, app.Repo.FullName, number)
+				r.enqueueApprove(ctx, app, app.Repo.FullName, number, login)
 			}
 		case "pr_open":
 			if login, ok := r.commentThumbsUp(ctx, app, st.PRCommentID); ok {
 				r.ackReaction(ctx, app, st.PRCommentID)
-				r.log.Info("merge approved by 👍 from @%s on %s#%d (poll)", login, app.Repo.FullName, issue.Number)
-				r.enqueueMerge(app, app.Repo.FullName, issue.Number, login)
+				r.log.Info("merge approved by 👍 from @%s on %s#%d (poll)", login, app.Repo.FullName, number)
+				r.enqueueMerge(app, app.Repo.FullName, number, login)
 			}
 		}
 	}

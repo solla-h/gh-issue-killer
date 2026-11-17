@@ -1,6 +1,7 @@
 package main
 
 import (
+	"sort"
 	"strconv"
 	"sync"
 )
@@ -136,6 +137,28 @@ func (s *Store) UpdateMeta(fullName string, fn func(*RepoMeta)) {
 	repo := s.repoLocked(fullName)
 	fn(&repo.Meta)
 	_ = s.SaveLocked()
+}
+
+// IssueNumbers lists the tracked issue numbers of a repo in ascending order.
+// The periodic scans use it instead of listing every open issue on GitHub:
+// listing all of them per repo on every 30 s cycle burned the token's hourly
+// API quota, and a rate-limited daemon goes blind (no polls, no reactions).
+func (s *Store) IssueNumbers(fullName string) []int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	repo := s.state.Repos[fullName]
+	if repo == nil {
+		return nil
+	}
+	numbers := make([]int, 0, len(repo.Issues))
+	for key := range repo.Issues {
+		number, err := strconv.Atoi(key)
+		if err == nil {
+			numbers = append(numbers, number)
+		}
+	}
+	sort.Ints(numbers)
+	return numbers
 }
 
 func (s *Store) Issue(fullName string, number int) IssueState {

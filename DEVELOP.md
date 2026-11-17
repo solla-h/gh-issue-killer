@@ -267,9 +267,12 @@ Other rules:
   scan.
 - Reaction events are not always delivered, so `checkReactions` (30 s poller)
   re-checks 👍 on the plan comment, the PR announcement, the review prompt and
-  a blocked task's status comment;
-  reviewed PRs are not in a task phase, so the review check runs for any open
-  issue with a stored `ReviewCommentID`.
+  a blocked task's status comment; reviewed PRs are not in a task phase, so the
+  review check runs for any tracked issue with a stored `ReviewCommentID`.
+  `checkReactions`, `checkPRFeedback` and `retryBlockedCI` walk
+  `Store.IssueNumbers` instead of listing every open issue: with 7 repos the
+  listing alone cost ~3200 requests/hour, the token hit its 5000/h core limit,
+  and for the rest of that hour polls returned 403 so a 👍 stayed invisible.
 
 ## 7. Job scheduler (`router.go`)
 
@@ -713,6 +716,7 @@ keeps tests quiet. Notable coverage:
 | `messages_test.go` | scaffolding catalogs, `app.text` resolution, language detection |
 | `reactions_test.go` | polled 👍 on the review prompt (approver only, consumed once) |
 | `reaction_ack_test.go` | 👀 acknowledgment, status comment id remembered, 👍 on it retries |
+| `poll_scan_test.go` | periodic scans start from tracked issues and cost no request when nothing is pending |
 | `blocked_ci_test.go` | green-check detection, auto-resume of CI-blocked tasks, other reasons untouched |
 | `router_ci_test.go` | the CI queue does not block work; cancel stops CI jobs |
 | `gh_test.go` | label transitions and GitHub helpers |
