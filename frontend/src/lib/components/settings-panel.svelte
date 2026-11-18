@@ -1,7 +1,8 @@
 <script lang="ts">
 	import X from '@lucide/svelte/icons/x';
 	import Plus from '@lucide/svelte/icons/plus';
-	import { onDestroy, onMount } from 'svelte';
+	import Trash2 from '@lucide/svelte/icons/trash-2';
+	import { onDestroy, onMount, tick } from 'svelte';
 	import {
 		getAuth,
 		getConfig,
@@ -18,7 +19,17 @@
 	import { dashboard } from '#lib/dashboard.svelte.ts';
 	import { showModalDialog } from '#lib/dialog.ts';
 	import { t } from '#lib/i18n.svelte.ts';
-	import { addRepoNames, parseRepoNames, removeRepoName } from '#lib/repos.ts';
+	import {
+		addRepoNames,
+		mutableRepoEntry,
+		parseRepoNames,
+		repoCodingAgent,
+		repoEntry,
+		repoObjects,
+		repoString,
+		removeRepoName,
+		setRepoStrings
+	} from '#lib/repos.ts';
 	import type {
 		AuthPayload,
 		ConfigPayload,
@@ -36,11 +47,13 @@
 		kind: 'idle' | 'ok' | 'fail';
 	}
 
-	interface ReleaseRow {
-		name: string;
-		enabled: boolean;
-		interval: string;
-		time: string;
+	interface RepoDraft {
+		agent: string;
+		model: string;
+		language: string;
+		releaseEnabled: boolean;
+		releaseInterval: string;
+		releaseTime: string;
 	}
 
 	interface ReleaseValue {
@@ -60,6 +73,22 @@
 		{ id: 'codex', name: 'Codex CLI' }
 	];
 
+	// The dialog is a tab interface, not one scrolling page: only the selected
+	// section is visible, and the vertical nav plus the horizontal row on narrow
+	// screens are one tablist driving the same `tab` value. Selection follows
+	// focus, as for native tabs.
+	const TABS = [
+		{ id: 'auth', label: 'settings.navAuth' },
+		{ id: 'repos', label: 'settings.navRepos' },
+		{ id: 'config', label: 'settings.navConfig' },
+		{ id: 'update', label: 'settings.navUpdate' }
+	] as const;
+
+	type TabID = (typeof TABS)[number]['id'];
+
+	let tab = $state<TabID>('config');
+	let tabInitialised = $state(false);
+
 	let configDoc = $state<Record<string, unknown>>({});
 	let configDefaults = $state<Record<string, unknown>>({});
 	let configPath = $state('–');
@@ -68,7 +97,12 @@
 
 	let repoText = $state('');
 	let repoDraft = $state('');
-	let rows = $state<ReleaseRow[]>([]);
+	// One draft per watched repo, keyed by name. The repo tab shows the
+	// selected one; the others keep their edits while switching, and saving
+	// writes all of them so removing a repo never drops another repo's rows.
+	// An empty agent/model/language means "follow the global value".
+	let drafts = $state<Record<string, RepoDraft>>({});
+	let selectedRepo = $state('');
 	let form = $state({ agent: 'opencode', model: '', proxy: '', webPort: '0', updateProxy: '', selfUpdate: false, followMaster: false });
 
 	let agents = $state<{ id: string; name?: string; version?: string }[]>([]);
@@ -99,6 +133,26 @@
 		dialog?.close();
 	}
 
+	function selectTab(id: TabID): void {
+		tab = id;
+		// The roving tabindex moves with the selection, so focus the new tab
+		// after the DOM update; keyboard and pointer both end up consistent.
+		void tick().then(() => document.getElementById('settings-tab-' + id)?.focus());
+	}
+
+	function onTabKeydown(event: KeyboardEvent): void {
+		const index = TABS.findIndex((section) => section.id === tab);
+		let next = index;
+		if (event.key === 'ArrowRight' || event.key === 'ArrowDown') next = (index + 1) % TABS.length;
+		else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp')
+			next = (index - 1 + TABS.length) % TABS.length;
+		else if (event.key === 'Home') next = 0;
+		else if (event.key === 'End') next = TABS.length - 1;
+		else return;
+		event.preventDefault();
+		selectTab(TABS[next].id);
+	}
+
 	let repoNames = $derived(parseRepoNames(repoText));
 	let agentOptions = $derived.by<{ id: string; version?: string }[]>(() =>
 		agents.length ? agents : AGENT_FALLBACK
@@ -115,6 +169,16 @@
 		}
 		return options;
 	});
+
+	// A repo row starts with "follow global"; a repo may still name an agent
+	// this machine does not have, so that value stays selectable too.
+	function repoAgentOptions(agent: string) {
+		const options = [{ value: '', label: t('settings.agentFollowGlobal') }, ...agentSelectOptions];
+		if (agent && !options.some((option) => option.value === agent)) {
+			options.push({ value: agent, label: agent });
+		}
+		return options;
+	}
 
 	function parseRepos(text: string): string[] {
 		const names = parseRepoNames(text);
@@ -187,24 +251,9 @@
 		};
 	}
 
-	function repoEntry(doc: Record<string, unknown>, name: string): Record<string, unknown> | null {
-		const repos = doc.repos;
-		if (Array.isArray(repos)) {
-			const found = repos.find(
-				(item) => item && typeof item === 'object' && (item as { repo?: string }).repo === name
-			);
-			return found ? (found as Record<string, unknown>) : null;
-		}
-		if (repos && typeof repos === 'object') {
-			const entry = (repos as Record<string, unknown>)[name];
-			return entry && typeof entry === 'object' ? (entry as Record<string, unknown>) : null;
-		}
-		return null;
-	}
-
 	function releaseValue(doc: Record<string, unknown>, name: string): ReleaseValue {
 		const base = releaseDefaults();
-		const entry = repoEntry(doc, name);
+		const entry = repoEntry(doc.repos, name);
 		const release =
 			entry && entry.release && typeof entry.release === 'object'
 				? (entry.release as Record<string, unknown>)
@@ -228,95 +277,125 @@
 		);
 	}
 
-	// repoObjects turns the array-of-names form into objects so a release block
-	// can sit next to codingAgent/model/language. The keyed object form and the
-	// array-of-objects form are already per-repo.
-	function repoObjects(doc: Record<string, unknown>, names: string[]): void {
-		const repos = doc.repos;
-		if (repos && !Array.isArray(repos) && typeof repos === 'object') return;
-		const existing = new Map<string, Record<string, unknown>>();
-		if (Array.isArray(repos)) {
-			for (const item of repos) {
-				if (item && typeof item === 'object' && typeof (item as { repo?: string }).repo === 'string') {
-					existing.set((item as { repo: string }).repo, { ...(item as Record<string, unknown>) });
-				} else if (typeof item === 'string') {
-					existing.set(item, { repo: item });
-				}
-			}
-		}
-		doc.repos = names.map((name) => existing.get(name) || { repo: name });
+	// draftFromConfig seeds a draft from the saved config: an empty agent,
+	// model or language means the repo follows the global value and the key
+	// stays out of the file.
+	function draftFromConfig(doc: Record<string, unknown>, name: string): RepoDraft {
+		const release = releaseValue(doc, name);
+		return {
+			agent: repoCodingAgent(doc.repos, name),
+			model: repoString(doc.repos, name, 'model'),
+			language: repoString(doc.repos, name, 'language'),
+			releaseEnabled: release.enabled,
+			releaseInterval: String(release.intervalDays),
+			releaseTime: release.time
+		};
 	}
 
-	function mutableRepoEntry(doc: Record<string, unknown>, name: string): Record<string, unknown> | null {
-		const repos = doc.repos;
-		if (Array.isArray(repos)) {
-			return (
-				(repos.find(
-					(item) => item && typeof item === 'object' && (item as { repo?: string }).repo === name
-				) as Record<string, unknown> | undefined) || null
-			);
-		}
-		if (repos && typeof repos === 'object') {
-			const table = repos as Record<string, unknown>;
-			if (!table[name] || typeof table[name] !== 'object') table[name] = {};
-			return table[name] as Record<string, unknown>;
-		}
-		return null;
+	function draftRelease(draft: RepoDraft): ReleaseValue {
+		return {
+			enabled: draft.releaseEnabled,
+			intervalDays: Number(draft.releaseInterval),
+			time: draft.releaseTime
+		};
 	}
 
-	function applyReleases(doc: Record<string, unknown>, names: string[]): void {
+	// draftIsCustom marks a repo that overrides at least one default, so the
+	// project dropdown can show which projects carry their own settings.
+	function draftIsCustom(draft: RepoDraft): boolean {
+		return Boolean(
+			draft.agent.trim() ||
+				draft.model.trim() ||
+				draft.language.trim() ||
+				releaseIsSet(draftRelease(draft), releaseDefaults())
+		);
+	}
+
+	let repoSelectOptions = $derived(
+		repoNames.map((name) => {
+			const draft = drafts[name];
+			return {
+				value: name,
+				label: draft && draftIsCustom(draft) ? name + ' · ' + t('settings.repoCustom') : name
+			};
+		})
+	);
+
+	const LANGUAGE_OPTIONS = [
+		{ value: '', label: 'settings.agentFollowGlobal' },
+		{ value: 'auto', label: 'settings.languageAuto' },
+		{ value: 'zh', label: 'settings.languageZH' },
+		{ value: 'en', label: 'settings.languageEN' }
+	] as const;
+
+	let languageOptions = $derived(
+		LANGUAGE_OPTIONS.map((option) => ({ value: option.value, label: t(option.label) }))
+	);
+
+	// applyRepoDrafts writes every repo's overrides and drops the keys that
+	// follow the global value. A plain name list only turns into objects when
+	// at least one repo actually overrides something, so an untouched config
+	// keeps its compact shape.
+	function applyRepoDrafts(doc: Record<string, unknown>, names: string[]): void {
 		const defaults = releaseDefaults();
-		const values = names.map((name) => {
-			const row = rows.find((candidate) => candidate.name === name);
-			const value: ReleaseValue = row
-				? { enabled: row.enabled, intervalDays: Number(row.interval), time: row.time || defaults.time }
-				: releaseValue(doc, name);
-			return [name, value] as const;
-		});
-		if (values.some(([, value]) => releaseIsSet(value, defaults))) repoObjects(doc, names);
-		for (const [name, value] of values) {
+		const values = names.map(
+			(name) => [name, drafts[name] ?? draftFromConfig(doc, name)] as const
+		);
+		const custom = values.some(([, draft]) => draftIsCustom(draft));
+		if (custom) repoObjects(doc, names);
+		// The three string fields share one writer so "follow global" always
+		// deletes the key instead of pinning today's value.
+		const byDraft = (field: 'agent' | 'model' | 'language') =>
+			Object.fromEntries(values.map(([name, draft]) => [name, draft[field]]));
+		setRepoStrings(doc, names, 'codingAgent', byDraft('agent'));
+		setRepoStrings(doc, names, 'model', byDraft('model'));
+		setRepoStrings(doc, names, 'language', byDraft('language'));
+		for (const [name, draft] of values) {
 			const entry = mutableRepoEntry(doc, name);
 			if (!entry) continue;
-			if (!releaseIsSet(value, defaults)) {
+			const release = draftRelease(draft);
+			if (!releaseIsSet(release, defaults)) {
 				delete entry.release;
 				continue;
 			}
-			const interval = Number(value.intervalDays);
-			const release: Record<string, unknown> = {
-				enabled: Boolean(value.enabled),
+			const interval = Number(release.intervalDays);
+			const value: Record<string, unknown> = {
+				enabled: Boolean(release.enabled),
 				intervalDays: Number.isInteger(interval) && interval >= 1 ? interval : defaults.intervalDays
 			};
 			// The default time stays implicit; only a deliberate schedule is
 			// written, so later default changes still reach these repos.
-			if (value.time && value.time !== defaults.time) release.time = value.time;
-			entry.release = release;
+			if (release.time && release.time !== defaults.time) value.time = release.time;
+			entry.release = value;
 		}
 	}
 
-	// releaseRowsProblem returns the i18n key of the first invalid field, or an
-	// empty string. The time input cannot produce a bad value, but a pasted or
+	// draftProblem returns the i18n key of the first invalid field, or an empty
+	// string. The time input cannot produce a bad value, but a pasted or
 	// restored draft can, and the PUT would reject it anyway.
-	function releaseRowsProblem(names: string[]): string {
+	function draftProblem(names: string[]): string {
 		for (const name of names) {
-			const row = rows.find((candidate) => candidate.name === name);
-			if (!row) continue;
-			const interval = Number(row.interval);
-			if (!Number.isInteger(interval) || interval < 1) return 'settings.releaseIntervalInvalid';
-			if (row.time && !RELEASE_TIME.test(row.time)) return 'settings.releaseTimeInvalid';
+			const draft = drafts[name];
+			if (!draft) continue;
+			if (!Number.isInteger(Number(draft.releaseInterval)) || Number(draft.releaseInterval) < 1) {
+				return 'settings.releaseIntervalInvalid';
+			}
+			if (draft.releaseTime && !RELEASE_TIME.test(draft.releaseTime)) {
+				return 'settings.releaseTimeInvalid';
+			}
 		}
 		return '';
 	}
 
-	// syncRows renders a row per repo while typing and keeps values already
-	// entered for repos that stay in the list.
-	function syncRows(): void {
+	// syncDrafts keeps edits already entered for repos that stay in the list,
+	// seeds new names from the saved config and keeps the selected project
+	// valid while the list is edited.
+	function syncDrafts(): void {
 		const names = parseRepoNames(repoText);
-		rows = names.map((name) => {
-			const existing = rows.find((row) => row.name === name);
-			if (existing) return existing;
-			const value = releaseValue(configDoc, name);
-			return { name, enabled: value.enabled, interval: String(value.intervalDays), time: value.time };
-		});
+		const next: Record<string, RepoDraft> = {};
+		for (const name of names) next[name] = drafts[name] ?? draftFromConfig(configDoc, name);
+		drafts = next;
+		if (!names.includes(selectedRepo)) selectedRepo = names[0] ?? '';
 	}
 
 	// The list and the text field share repoText; adding or removing a name
@@ -326,12 +405,15 @@
 		repoDraft = '';
 		if (next === repoNames.join('\n')) return;
 		repoText = next;
-		syncRows();
+		syncDrafts();
+		// Show the project that was just added instead of the first one.
+		const names = parseRepoNames(next);
+		selectedRepo = names[names.length - 1] ?? selectedRepo;
 	}
 
 	function removeRepo(name: string): void {
 		repoText = removeRepoName(repoText, name);
-		syncRows();
+		syncDrafts();
 	}
 
 	function setFeedback(message: string, kind: Feedback['kind'] = 'idle'): void {
@@ -349,10 +431,16 @@
 		configVersion = data.version || '–';
 		configProblem = data.configError || data.error || '';
 		repoText = repoList(configDoc).join('\n');
-		rows = repoList(configDoc).map((name) => {
-			const value = releaseValue(configDoc, name);
-			return { name, enabled: value.enabled, interval: String(value.intervalDays), time: value.time };
-		});
+		const names = repoList(configDoc);
+		drafts = {};
+		for (const name of names) drafts[name] = draftFromConfig(configDoc, name);
+		selectedRepo = names[0] ?? '';
+		// Open on the login tab while there is no usable config; everything
+		// else starts on the config tab. A manual reload keeps the open tab.
+		if (!tabInitialised) {
+			tab = configProblem ? 'auth' : 'config';
+			tabInitialised = true;
+		}
 		const agent = String(pick(configDoc, 'codingAgent', 'opencode'));
 		form.agent = agent;
 		form.model = String(pick(configDoc, 'model', ''));
@@ -386,13 +474,13 @@
 			formError(err instanceof Error ? err.message : String(err));
 			return;
 		}
-		const problem = releaseRowsProblem(repos);
+		const problem = draftProblem(repos);
 		if (problem) {
 			formError(t(problem));
 			return;
 		}
 		setRepoList(doc, repos);
-		applyReleases(doc, repos);
+		applyRepoDrafts(doc, repos);
 		const assign = (key: string, value: unknown) => {
 			if (value === '' || value === null || value === undefined) delete doc[key];
 			else doc[key] = value;
@@ -628,30 +716,46 @@
 			</Button>
 		</header>
 
-		<div class="flex min-h-0 flex-1">
-			<nav
-				class="hidden w-40 flex-none flex-col gap-1 border-r p-3 md:flex"
+		<div class="flex min-h-0 flex-1 flex-col md:flex-row">
+			<!-- One tablist drives both layouts: a vertical column from md up, a
+			     horizontal scrolling row below it. No focusgroup dependency:
+			     roving tabindex plus the arrow keys works in every engine,
+			     including the desktop shell's WKWebView. -->
+			<div
+				class="flex flex-none gap-1 overflow-x-auto border-b p-3 md:w-40 md:flex-col md:overflow-visible md:border-r md:border-b-0"
+				role="tablist"
 				aria-label={t('settings.aria')}
+				data-testid="settings-tabs"
 			>
-				{#each [{ id: 'settings-auth', label: 'settings.navAuth' }, { id: 'settings-config', label: 'settings.navConfig' }, { id: 'settings-update', label: 'settings.navUpdate' }] as section}
-					<a
-						href={'#' + section.id}
-						class="rounded-md px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+				{#each TABS as section (section.id)}
+					<button
+						type="button"
+						role="tab"
+						id={'settings-tab-' + section.id}
+						aria-selected={tab === section.id}
+						tabindex={tab === section.id ? 0 : -1}
+						class={cn(
+							'rounded-md px-3 py-2 text-left text-sm whitespace-nowrap text-muted-foreground transition-colors hover:bg-accent hover:text-foreground',
+							tab === section.id && 'bg-accent text-foreground'
+						)}
+						onclick={() => selectTab(section.id)}
+						onkeydown={onTabKeydown}
 					>
 						{t(section.label)}
-					</a>
+					</button>
 				{/each}
-			</nav>
+			</div>
 
 			<div class="min-h-0 flex-1 overflow-auto px-5 py-4">
-				<nav class="mb-4 flex flex-wrap gap-2 md:hidden" aria-label={t('settings.aria')}>
-					{#each [{ id: 'settings-auth', label: 'settings.navAuth' }, { id: 'settings-config', label: 'settings.navConfig' }, { id: 'settings-update', label: 'settings.navUpdate' }] as section}
-						<a class="chip" href={'#' + section.id}>{t(section.label)}</a>
-					{/each}
-				</nav>
-
 				<!-- login -->
-				<section id="settings-auth" class="flex scroll-mt-4 flex-col gap-2.5 rounded-lg border border-phase-work/30 bg-phase-work/5 p-4" data-testid="auth-panel">
+				<div
+					id="settings-auth"
+					role="tabpanel"
+					aria-labelledby="settings-tab-auth"
+					hidden={tab !== 'auth'}
+					class="flex flex-col gap-2.5 rounded-lg border border-phase-work/30 bg-phase-work/5 p-4"
+					data-testid="auth-panel"
+				>
 					<div class="flex flex-wrap items-baseline gap-2.5">
 						<span class="text-base tracking-[0.04em]">{t('auth.title')}</span>
 						<span
@@ -716,49 +820,169 @@
 							</Button>
 						</div>
 					</details>
-				</section>
+				</div>
 
-				{#if configProblem}
+				<div
+					id="settings-repos"
+					role="tabpanel"
+					aria-labelledby="settings-tab-repos"
+					hidden={tab !== 'repos'}
+					class="flex flex-col gap-3"
+					data-testid="repos-panel"
+				>
+					<h3 class="band-title mb-2">{t('settings.navRepos')}</h3>
+
+					<!-- The global values every project inherits; editing them lives
+					     in the config tab so there is only one source of truth. -->
 					<div
-						class="border-l-2 border-phase-work bg-phase-work/10 px-2.5 py-2 text-sm whitespace-pre-wrap"
-						data-testid="settings-note"
+						class="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/40 px-3 py-2"
+						data-testid="repos-defaults"
 					>
-						{t('settings.setupHint')}
-						{configProblem}
+						<div class="min-w-0 flex-1">
+							<div class="text-xs tracking-[0.04em] text-muted-foreground">
+								{t('settings.repoDefaults')}
+							</div>
+							<div class="truncate text-sm" data-testid="repos-defaults-value">
+								{form.agent}
+								{form.model ? ' · ' + form.model : ''}
+								{form.proxy ? ' · ' + form.proxy : ''}
+							</div>
+						</div>
+						<Button type="button" variant="ghost" size="sm" onclick={() => selectTab('config')}>
+							{t('settings.repoDefaultsEdit')}
+						</Button>
 					</div>
-				{/if}
 
-				<section id="settings-config" class="mt-6 scroll-mt-4">
-					<h3 class="band-title mb-2">{t('settings.navConfig')}</h3>
-					<form id="settings-form" class="flex flex-col gap-4" autocomplete="off" onsubmit={saveSettings}>
-					<div class="flex flex-col gap-1" data-testid="repo-settings">
-						<span class="text-xs tracking-[0.04em] text-muted-foreground">{t('settings.repos')}</span>
-						<ul
-							class="flex flex-col divide-y divide-border/60 overflow-hidden rounded-md border"
-							data-testid="repo-list"
+					<div class="flex flex-col gap-1">
+						<span class="text-xs tracking-[0.04em] text-muted-foreground">
+							{t('settings.repoSelect')}
+						</span>
+						<div class="flex flex-wrap items-center gap-2">
+							<Select
+								options={repoSelectOptions}
+								label={t('settings.repoSelect')}
+								placeholder={t('settings.repoSelectPlaceholder')}
+								testid="repo-select"
+								class="min-w-[200px] flex-1"
+								bind:value={selectedRepo}
+							/>
+							<Button
+								type="button"
+								variant="outline"
+								class="flex-none text-muted-foreground hover:text-destructive"
+								disabled={!selectedRepo}
+								onclick={() => removeRepo(selectedRepo)}
+								data-testid="repo-delete"
+							>
+								<Trash2 class="size-4" aria-hidden="true" />
+								{t('settings.repoDelete')}
+							</Button>
+						</div>
+					</div>
+
+					{#if selectedRepo && drafts[selectedRepo]}
+						<div
+							class="flex flex-col rounded-lg border"
+							data-testid="repo-card"
+							data-repo={selectedRepo}
 						>
-							{#each repoNames as name (name)}
-								<li class="flex min-w-0 items-center gap-2 px-2.5 py-1" data-repo={name}>
-									<span class="min-w-0 flex-1 truncate text-sm">{name}</span>
-									<Button
-										type="button"
-										variant="ghost"
-										size="icon"
-										class="size-7 flex-none text-muted-foreground hover:text-destructive"
-										aria-label={t('settings.repoRemove', { repo: name })}
-										data-testid="repo-remove"
-										onclick={() => removeRepo(name)}
-									>
-										<X class="size-3.5" aria-hidden="true" />
-									</Button>
-								</li>
-							{:else}
-								<li class="px-2.5 py-2 text-sm text-muted-foreground">
-									{t('settings.reposEmpty')}
-								</li>
-							{/each}
-						</ul>
-						<div class="mt-1 flex items-center gap-2">
+							<div class="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 border-b border-border/60 bg-muted/40 px-3 py-2">
+								<span class="text-sm font-medium">{selectedRepo}</span>
+								<span class="text-xs text-muted-foreground">· {t('settings.repoCardHint')}</span>
+							</div>
+							<div class="flex flex-col gap-3 p-3">
+								<div class="flex flex-wrap gap-3">
+									<div class="flex min-w-[150px] flex-1 flex-col gap-1">
+										<span class="text-xs tracking-[0.04em] text-muted-foreground">
+											{t('settings.agent')}
+										</span>
+										<Select
+											options={repoAgentOptions(drafts[selectedRepo].agent)}
+											label={t('settings.repoAgent', { repo: selectedRepo })}
+											testid="repo-agent"
+											bind:value={drafts[selectedRepo].agent}
+										/>
+									</div>
+									<label class="flex min-w-[150px] flex-1 flex-col gap-1">
+										<span class="text-xs tracking-[0.04em] text-muted-foreground">
+											{t('settings.model')}
+										</span>
+										<Input
+											list="repo-models"
+											spellcheck="false"
+											placeholder={form.model
+												? t('settings.repoFollowWith', { value: form.model })
+												: t('settings.repoModelHint')}
+											data-testid="repo-model"
+											bind:value={drafts[selectedRepo].model}
+										/>
+									</label>
+									<div class="flex min-w-[140px] flex-1 flex-col gap-1">
+										<span class="text-xs tracking-[0.04em] text-muted-foreground">
+											{t('settings.language')}
+										</span>
+										<Select
+											options={languageOptions}
+											label={t('settings.language')}
+											testid="repo-language"
+											bind:value={drafts[selectedRepo].language}
+										/>
+									</div>
+								</div>
+
+								<div class="flex flex-col gap-2 border-t border-border/60 pt-3">
+									<div class="flex flex-wrap items-baseline gap-2.5">
+										<span class="text-xs tracking-[0.04em] text-muted-foreground">
+											{t('settings.release')}
+										</span>
+										<small class="text-xs text-muted-foreground">{t('settings.releaseHint')}</small>
+									</div>
+									<div class="flex flex-wrap items-end gap-2.5">
+										<label class="flex items-center gap-1.5 pb-1 text-2xs text-muted-foreground">
+											<input
+												type="checkbox"
+												class="accent-phase-work"
+												data-testid="repo-release-enabled"
+												bind:checked={drafts[selectedRepo].releaseEnabled}
+											/>
+											{t('settings.releaseEnabled')}
+										</label>
+										<label class="flex flex-col gap-1 text-2xs tracking-[0.03em] text-muted-foreground">
+											{t('settings.releaseInterval')}
+											<input
+												type="number"
+												min="1"
+												step="1"
+												class="h-9 w-20 rounded-md border border-input bg-transparent px-2 text-sm"
+												bind:value={drafts[selectedRepo].releaseInterval}
+											/>
+										</label>
+										<label class="flex flex-col gap-1 text-2xs tracking-[0.03em] text-muted-foreground">
+											{t('settings.releaseTime')}
+											<input
+												type="time"
+												class="h-9 w-[7.5rem] rounded-md border border-input bg-transparent px-2 text-sm"
+												bind:value={drafts[selectedRepo].releaseTime}
+											/>
+										</label>
+									</div>
+								</div>
+							</div>
+						</div>
+					{:else}
+						<p
+							class="m-0 rounded-lg border border-dashed px-3 py-4 text-sm text-muted-foreground"
+							data-testid="repos-empty"
+						>
+							{t('settings.reposEmpty')}
+						</p>
+					{/if}
+
+					<div class="flex flex-col gap-1 border-t border-border/60 pt-3">
+						<span class="text-xs tracking-[0.04em] text-muted-foreground">
+							{t('settings.repoAddTitle')}
+						</span>
+						<div class="flex items-center gap-2">
 							<Input
 								spellcheck="false"
 								placeholder={t('settings.repoAddPlaceholder')}
@@ -778,41 +1002,31 @@
 						</div>
 					</div>
 
-					{#if repoNames.length}
-						<div class="flex flex-col gap-2 border-t pt-3" data-testid="release-rows">
-							<div class="flex flex-wrap items-baseline gap-2.5">
-								<span class="text-xs tracking-[0.04em] text-muted-foreground">{t('settings.release')}</span>
-								<small class="text-xs text-muted-foreground">{t('settings.releaseHint')}</small>
-							</div>
-							{#each rows as row (row.name)}
-								<div class="flex flex-wrap items-end gap-2.5 border-b border-border/60 py-1.5 last:border-b-0 last:pb-0" data-repo={row.name}>
-									<span class="min-w-[110px] flex-[1_1_150px] break-words pb-1 text-sm">{row.name}</span>
-									<label class="flex items-center gap-1.5 pb-1 text-2xs text-muted-foreground">
-										<input type="checkbox" class="accent-phase-work" bind:checked={row.enabled} />
-										{t('settings.releaseEnabled')}
-									</label>
-									<label class="flex flex-col gap-1 text-2xs tracking-[0.03em] text-muted-foreground">
-										{t('settings.releaseInterval')}
-										<input
-											type="number"
-											min="1"
-											step="1"
-											class="h-9 w-20 rounded-md border border-input bg-transparent px-2 text-sm"
-											bind:value={row.interval}
-										/>
-									</label>
-									<label class="flex flex-col gap-1 text-2xs tracking-[0.03em] text-muted-foreground">
-										{t('settings.releaseTime')}
-										<input
-											type="time"
-											class="h-9 w-[7.5rem] rounded-md border border-input bg-transparent px-2 text-sm"
-											bind:value={row.time}
-										/>
-									</label>
-								</div>
-							{/each}
+					<datalist id="repo-models">
+						{#each models as model (model)}
+							<option value={model}></option>
+						{/each}
+					</datalist>
+				</div>
+
+				<div
+					id="settings-config"
+					role="tabpanel"
+					aria-labelledby="settings-tab-config"
+					hidden={tab !== 'config'}
+					class="flex flex-col gap-3"
+				>
+					{#if configProblem}
+						<div
+							class="border-l-2 border-phase-work bg-phase-work/10 px-2.5 py-2 text-sm whitespace-pre-wrap"
+							data-testid="settings-note"
+						>
+							{t('settings.setupHint')}
+							{configProblem}
 						</div>
 					{/if}
+					<h3 class="band-title mb-2">{t('settings.navConfig')}</h3>
+					<form id="settings-form" class="flex flex-col gap-4" autocomplete="off" onsubmit={saveSettings}>
 
 					<div class="flex flex-wrap gap-3">
 						<div class="flex min-w-[150px] flex-1 flex-col gap-1">
@@ -862,43 +1076,49 @@
 					</div>
 
 					</form>
-				</section>
 
-				{#if detected}
-					<div class="flex flex-col gap-1 text-xs text-muted-foreground" data-testid="settings-detected">
-						<div class="flex flex-wrap gap-3">
-							<span>{t('settings.detectedAgents')}:</span>
-							{#if detected.agents.length}
-								{#each detected.agents as agent (agent.id)}
-									<span class="text-phase-done">{agent.version ? agent.id + ' · ' + agent.version : agent.id}</span>
-								{/each}
-							{:else}
-								<span>{t('settings.noAgents')}</span>
+					{#if detected}
+						<div class="flex flex-col gap-1 text-xs text-muted-foreground" data-testid="settings-detected">
+							<div class="flex flex-wrap gap-3">
+								<span>{t('settings.detectedAgents')}:</span>
+								{#if detected.agents.length}
+									{#each detected.agents as agent (agent.id)}
+										<span class="text-phase-done">{agent.version ? agent.id + ' · ' + agent.version : agent.id}</span>
+									{/each}
+								{:else}
+									<span>{t('settings.noAgents')}</span>
+								{/if}
+							</div>
+							{#if detected.proxy}
+								<div class="flex flex-wrap gap-3">
+									<span>{t('settings.detectedProxy')}:</span>
+									<span class="text-phase-done">{detected.proxy}</span>
+								</div>
+							{/if}
+							{#if detected.repos.length}
+								<div class="flex flex-wrap gap-3">
+									<span>{t('settings.detectedRepos')}:</span>
+									{#each detected.repos as repo (repo.repo)}
+										<span class={repo.permission === 'admin' || repo.permission === 'write' ? 'text-phase-done' : 'text-phase-blocked'}>
+											{repo.repo} · {repo.permission}{repo.error ? ' (' + repo.error + ')' : ''}
+										</span>
+									{/each}
+								</div>
+							{/if}
+							{#if detected.error}
+								<div class="flex flex-wrap gap-3"><span>!</span><span class="text-phase-blocked">{detected.error}</span></div>
 							{/if}
 						</div>
-						{#if detected.proxy}
-							<div class="flex flex-wrap gap-3">
-								<span>{t('settings.detectedProxy')}:</span>
-								<span class="text-phase-done">{detected.proxy}</span>
-							</div>
-						{/if}
-						{#if detected.repos.length}
-							<div class="flex flex-wrap gap-3">
-								<span>{t('settings.detectedRepos')}:</span>
-								{#each detected.repos as repo (repo.repo)}
-									<span class={repo.permission === 'admin' || repo.permission === 'write' ? 'text-phase-done' : 'text-phase-blocked'}>
-										{repo.repo} · {repo.permission}{repo.error ? ' (' + repo.error + ')' : ''}
-									</span>
-								{/each}
-							</div>
-						{/if}
-						{#if detected.error}
-							<div class="flex flex-wrap gap-3"><span>!</span><span class="text-phase-blocked">{detected.error}</span></div>
-						{/if}
-					</div>
-				{/if}
+					{/if}
+				</div>
 
-				<section id="settings-update" class="mt-6 scroll-mt-4">
+				<div
+					id="settings-update"
+					role="tabpanel"
+					aria-labelledby="settings-tab-update"
+					hidden={tab !== 'update'}
+					class="flex flex-col gap-3"
+				>
 					<h3 class="band-title mb-2">{t('settings.navUpdate')}</h3>
 					<div class="flex flex-col gap-3 rounded-lg border p-4" data-testid="update-card">
 						<div class="flex flex-wrap gap-4 text-sm text-muted-foreground">
@@ -944,7 +1164,7 @@
 							<dd class="break-all">{dashboard.data?.configFile || configPath}</dd>
 						</dl>
 					</div>
-				</section>
+				</div>
 			</div>
 		</div>
 
@@ -988,5 +1208,28 @@
 	.settings-dialog::backdrop {
 		background: oklch(0 0 0 / 0.5);
 		backdrop-filter: blur(2px);
+	}
+
+	/* The selected tab must not be signalled by colour alone (WCAG 1.4.1), so
+	   it also carries a bar. The bar is a pseudo-element border, not a
+	   background, so forced-colours mode keeps it and the tab never resizes. */
+	[role='tab'] {
+		position: relative;
+	}
+
+	[role='tab'][aria-selected='true']::after {
+		content: '';
+		position: absolute;
+		inset: auto 0 0;
+		border-block-end: 2px solid currentColor;
+	}
+
+	/* md and up: the tablist is a column, so the bar moves to the left edge. */
+	@media (min-width: 48rem) {
+		[role='tab'][aria-selected='true']::after {
+			inset: 0 auto 0 0;
+			border-block-end: 0;
+			border-inline-start: 2px solid currentColor;
+		}
 	}
 </style>
