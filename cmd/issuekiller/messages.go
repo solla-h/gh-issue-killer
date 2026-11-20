@@ -77,7 +77,7 @@ var scaffoldZH = map[string]string{
 	"bug.abort.hint":  "确认后可以回复 `@%s ok <补充信息>` 或 `@%s continue` 继续。",
 
 	"error.title": "### 🤖 流程出错",
-	"error.hint":  "回复 `@%s continue` 重试。",
+	"error.hint":  "给这条评论加 👍 或回复 `@%s continue` 继续。",
 
 	"review.empty_summary": "(没有给出总结)",
 	"review.inline_title":  "### 行内意见",
@@ -169,7 +169,7 @@ var scaffoldEN = map[string]string{
 	"bug.abort.hint":  "Reply `@%s ok <details>` or `@%s continue` to proceed.",
 
 	"error.title": "### 🤖 Something went wrong",
-	"error.hint":  "Reply `@%s continue` to retry.",
+	"error.hint":  "Add 👍 to this comment or reply `@%s continue` to continue.",
 
 	"review.empty_summary": "(no summary provided)",
 	"review.inline_title":  "### Inline findings",
