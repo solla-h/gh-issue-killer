@@ -2256,6 +2256,7 @@ func doMerge(ctx context.Context, app *AppContext, trigger Trigger, issue Issue,
 				app.Store.UpdateIssue(app.Repo.FullName, number, func(state *IssueState) {
 					state.Phase = "blocked"
 					state.BlockedReason = reason
+					state.BlockedByCI = false
 				})
 				app.GH.SetAgentState(ctx, app.Repo.FullName, number, awaitingLabel)
 				_, _ = app.GH.PostComment(ctx, app.Repo.FullName, number,
@@ -2270,7 +2271,10 @@ func doMerge(ctx context.Context, app *AppContext, trigger Trigger, issue Issue,
 			}
 			pr = updated
 			if pr.State != "open" {
-				app.Store.UpdateIssue(app.Repo.FullName, number, func(state *IssueState) { state.Phase = "done" })
+				app.Store.UpdateIssue(app.Repo.FullName, number, func(state *IssueState) {
+					state.Phase = "done"
+					state.BlockedByCI = false
+				})
 				app.GH.SetAgentState(ctx, app.Repo.FullName, number, "")
 				return
 			}
@@ -2328,6 +2332,7 @@ func doMerge(ctx context.Context, app *AppContext, trigger Trigger, issue Issue,
 		app.Store.UpdateIssue(app.Repo.FullName, number, func(state *IssueState) {
 			state.Phase = "blocked"
 			state.BlockedReason = sanitize(detail)
+			state.BlockedByCI = false
 		})
 		app.GH.SetAgentState(ctx, app.Repo.FullName, number, awaitingLabel)
 		_, _ = app.GH.PostComment(ctx, app.Repo.FullName, number,
@@ -2348,6 +2353,7 @@ func doMerge(ctx context.Context, app *AppContext, trigger Trigger, issue Issue,
 	app.Store.UpdateIssue(app.Repo.FullName, number, func(state *IssueState) {
 		state.Phase = "done"
 		state.MergedAt = nowISO()
+		state.BlockedByCI = false
 	})
 	app.GH.SetAgentState(ctx, app.Repo.FullName, number, "")
 	_, _ = app.GH.PostComment(ctx, app.Repo.FullName, number, strings.Join([]string{

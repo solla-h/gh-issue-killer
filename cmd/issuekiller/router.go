@@ -537,16 +537,23 @@ func (r *Router) retryBlockedCI(ctx context.Context, app *AppContext) {
 			continue
 		}
 		r.log.Info("blocked task %s#%d has green checks; retrying the merge", app.Repo.FullName, number)
-		app.Store.UpdateIssue(app.Repo.FullName, number, func(state *IssueState) {
-			state.BlockedByCI = false
-		})
 		r.enqueue(app.Repo.FullName, fmt.Sprintf("%s#%d", app.Repo.FullName, number), stageWork, func(jobCtx context.Context) {
 			issue, err := app.GH.GetIssue(jobCtx, app.Repo.FullName, number)
-			if err != nil || issue.State != "open" {
+			if err != nil {
+				r.log.Warn("blocked CI retry %s#%d stopped: get issue: %v", app.Repo.FullName, number, err)
+				return
+			}
+			if issue.State != "open" {
+				r.log.Warn("blocked CI retry %s#%d stopped: issue is %s", app.Repo.FullName, number, issue.State)
 				return
 			}
 			current := r.store.Issue(app.Repo.FullName, number)
-			if current.Phase != "blocked" || current.PRNumber == 0 {
+			if current.Phase != "blocked" {
+				r.log.Warn("blocked CI retry %s#%d stopped: phase changed to %q", app.Repo.FullName, number, current.Phase)
+				return
+			}
+			if current.PRNumber == 0 {
+				r.log.Warn("blocked CI retry %s#%d stopped: no PR", app.Repo.FullName, number)
 				return
 			}
 			doMerge(jobCtx, app, Trigger{
@@ -555,6 +562,13 @@ func (r *Router) retryBlockedCI(ctx context.Context, app *AppContext) {
 				Sender:      r.agentLogin,
 				Key:         fmt.Sprintf("retry-%d", time.Now().UnixNano()),
 			}, issue, current)
+			// A CI re-block remains eligible for this poller. Every other returned
+			// outcome has consumed the retry and must not retain the old flag.
+			app.Store.UpdateIssue(app.Repo.FullName, number, func(state *IssueState) {
+				if state.Phase != "blocked" || !state.BlockedByCI {
+					state.BlockedByCI = false
+				}
+			})
 		})
 	}
 }

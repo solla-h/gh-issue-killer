@@ -41,9 +41,9 @@ func TestChecksAllGreen(t *testing.T) {
 	}
 }
 
-// A task parked by a failed CI check resumes once the PR is green; the flag is
-// consumed so the poller does not enqueue the same merge on every scan.
-func TestRetryBlockedCIResumesGreenPR(t *testing.T) {
+// A task parked by a failed CI check remains eligible until its merge job
+// actually runs, so a dropped job can be recovered by a later scan.
+func TestRetryBlockedCIRetriesAfterDroppedJob(t *testing.T) {
 	store := &Store{file: filepath.Join(t.TempDir(), "state.json"), state: State{Version: 1, Repos: map[string]*RepoState{}}}
 	store.UpdateIssue("acme/app", 5, func(st *IssueState) {
 		st.Phase = "blocked"
@@ -78,18 +78,29 @@ func TestRetryBlockedCIResumesGreenPR(t *testing.T) {
 		Store: store,
 		Log:   NewSilentLogger(),
 	}
-	router := NewRouter(&Config{PlanParallel: 1, ImplementParallel: 1},
-		map[string]*AppContext{"acme/app": app}, "bot", store, NewSilentLogger())
-
-	router.retryBlockedCI(context.Background(), app)
-	if got := store.Issue("acme/app", 5).BlockedByCI; got {
-		t.Fatal("BlockedByCI was not consumed")
+	// A missing pool drops enqueue, as can a process exit before its queued job
+	// starts. The persisted flag must survive for a newly constructed router.
+	first := &Router{
+		store: store, log: NewSilentLogger(), pools: map[string]*repoPool{},
+		active: map[string]bool{}, queued: map[string]bool{}, cancels: map[string]context.CancelFunc{},
+	}
+	first.retryBlockedCI(context.Background(), app)
+	if got := store.Issue("acme/app", 5).BlockedByCI; !got {
+		t.Fatal("BlockedByCI was cleared before the merge job ran")
 	}
 
-	// Second scan must not do anything: the flag is gone.
-	router.retryBlockedCI(context.Background(), app)
-	if got := store.Issue("acme/app", 5).BlockedByCI; got {
-		t.Fatal("BlockedByCI came back")
+	pool := &repoPool{plan: make(chan routerJob, 1), work: make(chan routerJob, 1), ci: make(chan routerJob, 1)}
+	second := &Router{
+		store: store, log: NewSilentLogger(),
+		pools:  map[string]*repoPool{"acme/app": pool},
+		active: map[string]bool{}, queued: map[string]bool{}, cancels: map[string]context.CancelFunc{},
+	}
+	second.retryBlockedCI(context.Background(), app)
+	if len(pool.work) != 1 {
+		t.Fatalf("next router scan queued %d jobs, want 1", len(pool.work))
+	}
+	if got := store.Issue("acme/app", 5).BlockedByCI; !got {
+		t.Fatal("BlockedByCI was cleared when retry was only queued")
 	}
 }
 

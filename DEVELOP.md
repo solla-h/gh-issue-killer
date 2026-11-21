@@ -439,10 +439,10 @@ as `blocked` and the message says how many attempts ran.
 
 CI-blocked tasks are marked with `BlockedByCI: true`. `retryBlockedCI`, part of
 the 30 s poll, watches them: when the PR is open, not conflicting, and every
-check run finished green, it clears the flag and re-runs the merge path, so a
-transient CI failure does not need a manual `合并`. Other blocked reasons (local
-checks, an unreproducible bug, exhausted conflict rounds) never resume on their
-own.
+check run finished green, it queues the merge path but leaves the flag set until
+that job runs. A lost queued job is therefore picked up by a later scan. Other
+blocked reasons (local checks, an unreproducible bug, exhausted conflict rounds)
+never resume on their own.
 
 ## 10. Checks, manifest and screenshots
 
