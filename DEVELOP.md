@@ -440,9 +440,15 @@ as `blocked` and the message says how many attempts ran.
 CI-blocked tasks are marked with `BlockedByCI: true`. `retryBlockedCI`, part of
 the 30 s poll, watches them: when the PR is open, not conflicting, and every
 check run finished green, it queues the merge path but leaves the flag set until
-that job runs. A lost queued job is therefore picked up by a later scan. Other
-blocked reasons (local checks, an unreproducible bug, exhausted conflict rounds)
-never resume on their own.
+that job runs. A lost queued job is therefore picked up by a later scan while
+the phase is still `blocked`. The flag also stays set when the retry job exits
+through an early guard (closed issue, changed phase, missing PR) and when the
+merge re-blocks on CI after running, so those outcomes remain retryable. If the
+daemon dies after the merge job set the phase to `merging`, the same poll
+resumes it once no job owns the issue (both in-memory maps are empty after a
+restart) and re-enters the merge path, which is safe for a PR that already
+merged. Other blocked reasons (local checks, an unreproducible bug, exhausted
+conflict rounds) never resume on their own.
 
 ## 10. Checks, manifest and screenshots
 
@@ -772,7 +778,7 @@ keeps tests quiet. Notable coverage:
 | `reactions_test.go` | polled 👍 on the review prompt (approver only, consumed once) |
 | `reaction_ack_test.go` | 👀 acknowledgment, status comment id remembered, 👍 on it retries |
 | `poll_scan_test.go` | periodic scans start from tracked issues and cost no request when nothing is pending |
-| `blocked_ci_test.go` | green-check detection, auto-resume of CI-blocked tasks, other reasons untouched |
+| `blocked_ci_test.go` | green-check detection, auto-resume of CI-blocked tasks and interrupted merges, guard exits and the merge-job flag rule, other reasons untouched |
 | `router_ci_test.go` | the CI queue does not block work; cancel stops CI jobs |
 | `gh_test.go` | label transitions and GitHub helpers |
 | `release_test.go` | version tag parsing, bump rules, commit classification, due check (calendar days and configured time), time parsing/defaults, release request body, disabled/not-due/no-commit skips |
