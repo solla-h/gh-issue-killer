@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -158,6 +159,9 @@ type Router struct {
 	queued     map[string]bool
 	cancels    map[string]context.CancelFunc
 	started    map[string]time.Time
+	// prLocks serializes the jobs that write one pull request's branch; see
+	// serialize.
+	prLocks map[string]*sync.Mutex
 }
 
 func NewRouter(cfg *Config, contexts map[string]*AppContext, agentLogin string, store *Store, log *Logger) *Router {
@@ -172,6 +176,7 @@ func NewRouter(cfg *Config, contexts map[string]*AppContext, agentLogin string, 
 		queued:     map[string]bool{},
 		cancels:    map[string]context.CancelFunc{},
 		started:    map[string]time.Time{},
+		prLocks:    map[string]*sync.Mutex{},
 	}
 	planWorkers := cfg.PlanParallel
 	if planWorkers < 1 {
@@ -290,7 +295,71 @@ func (r *Router) enqueue(fullName, key string, stage jobStage, fn func(context.C
 	case stageCI:
 		queue = pool.ci
 	}
-	queue <- routerJob{key: key, ctx: jobCtx, fn: fn}
+	queue <- routerJob{key: key, ctx: jobCtx, fn: r.serialize(fullName, key, stage, fn)}
+}
+
+// serialize holds one lock per pull request for the whole work job. The issue
+// flow (revise, merge) and the PR flow (review fix, merge PR) reach the same
+// branch under different job keys, so the key alone cannot keep them apart:
+// without the lock the second push is a non-fast-forward and the task parks as
+// blocked. CI settle jobs are deliberately excluded, because a merge job waits
+// for its CI job and both taking the lock would deadlock.
+func (r *Router) serialize(fullName, key string, stage jobStage, fn func(context.Context)) func(context.Context) {
+	if stage != stageWork {
+		return fn
+	}
+	return func(ctx context.Context) {
+		unlock := r.lockPR(fullName, r.prNumberFor(fullName, key))
+		defer unlock()
+		if ctx.Err() != nil {
+			return
+		}
+		fn(ctx)
+	}
+}
+
+// prNumberFor maps a job key to the pull request it may write: a review or
+// merge key already names the PR, while an issue job only carries the issue
+// number and learns the PR from the state.
+func (r *Router) prNumberFor(fullName, key string) int {
+	number := jobNumber(key)
+	if number == 0 || r.store == nil {
+		return number
+	}
+	if st := r.store.Issue(fullName, number); st.PRNumber > 0 {
+		return st.PRNumber
+	}
+	return number
+}
+
+func (r *Router) lockPR(fullName string, number int) func() {
+	if number <= 0 {
+		return func() {}
+	}
+	key := fmt.Sprintf("%s#%d", fullName, number)
+	r.mu.Lock()
+	lock := r.prLocks[key]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		r.prLocks[key] = lock
+	}
+	r.mu.Unlock()
+	lock.Lock()
+	return lock.Unlock
+}
+
+// jobNumber reads the number a job key names: "<repo>#<n>" or
+// "<repo>#<n>#suffix", where the repo itself never contains a '#'.
+func jobNumber(key string) int {
+	parts := strings.SplitN(key, "#", 3)
+	if len(parts) < 2 {
+		return 0
+	}
+	number, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return 0
+	}
+	return number
 }
 
 func (r *Router) cancelActive(fullName string, number int) {

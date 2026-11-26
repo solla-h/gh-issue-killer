@@ -336,6 +336,14 @@ Rules that keep it safe:
   before the worktree is removed, so cleanup never races a running agent.
 - A merge waits for the issue's CI job (`waitCISettle`) before touching the
   worktree. Two agents never edit one worktree at the same time.
+- Work jobs also hold a per-PR lock (`Router.serialize`): the issue flow
+  (`<repo>#<issue>` revise/merge) and the PR flow (`<repo>#<pr>#reviewfix`,
+  `<repo>#<pr>#mergepr`) reach the same branch under different keys, so a
+  review fix and a revision used to push concurrently and the slower one was
+  rejected as a non-fast-forward, parking the issue as `blocked`. The lock is
+  taken when the job starts, after the state lookup that maps an issue to its
+  PR. CI settle jobs are deliberately excluded: a merge job waits for its CI
+  job, so both taking the lock would deadlock.
 - The CI queue exists so a slow gate never occupies the implementation slot;
   the coding stage only enqueues and returns.
 
@@ -534,6 +542,11 @@ fallback; both funnel into `Router.Handle*`.
 - Push uses a one-shot `http.extraheader` with the token, built into
   `LocalRepo.Env`; nothing is written to any gitconfig.
 - `plan` uses a temporary detached worktree under `tmp/`.
+- `syncWorktreeBranch` fast-forwards an issue worktree to its branch head right
+  before a revision edits it, because a review fix can have pushed to the same
+  PR branch in the meantime. Only these branches are written by the daemon, so
+  a fast-forward is enough; a diverged history is reported as a blocked error
+  instead of being rebased or force-pushed.
 
 ## 13. Coding agents (`runner.go`)
 
@@ -860,6 +873,7 @@ keeps tests quiet. Notable coverage:
 | `openurl_test.go` | per-platform browser command, no shell, injected runner |
 | `webconfig_test.go` | `/api/config` validation/round-trip/origin check, `release` defaults and rejection, `/api/detect` degradation, `/api/update` payload, snapshot without a router |
 | `webprojects_test.go` | `/api/projects` role payload and access URL, add verifies GitHub first and leaves the file untouched on failure, remove keeps the other repos and their overrides, all three `repos` shapes, origin check |
+| `router_prlock_test.go` | one work job per PR at a time across the issue and PR keys, CI jobs skip the PR lock, key parsing |
 | `selfupdate_test.go` | version ordering, asset selection, mirror/digest parsing, archive extraction, checksum mismatch keeps the binary |
 | `wizard_test.go` | `-init` setup wizard flows |
 | `logs_test.go`, `logging_test.go` | log rotation, follower, daemonize helpers |

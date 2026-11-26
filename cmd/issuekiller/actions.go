@@ -521,6 +521,13 @@ func doRevise(ctx context.Context, app *AppContext, trigger Trigger, issue Issue
 		blockIssue(ctx, app, number, fmt.Errorf("worktree %s is gone: %w", worktree, err))
 		return
 	}
+	// The PR review flow may have pushed a fix to this branch since the
+	// worktree was created; build on the current head instead of failing the
+	// push at the end. The per-PR lock keeps the two from running at once.
+	if err := syncWorktreeBranch(ctx, worktree, app.Local.HTTPSURL, app.Local.Env, st.Branch); err != nil {
+		blockIssue(ctx, app, number, err)
+		return
+	}
 	app.Log.Info("revise start for %s#%d (PR %d)", app.Repo.FullName, number, st.PRNumber)
 	react(ctx, app, trigger, "rocket")
 	app.Store.UpdateIssue(app.Repo.FullName, number, func(state *IssueState) {
