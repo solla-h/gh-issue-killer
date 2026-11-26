@@ -171,6 +171,28 @@ func TestApprovalNotesRetryRunsImplement(t *testing.T) {
 	if state.ExtraNotes != "之前记下的补充\n顺便补个单测" {
 		t.Fatalf("ExtraNotes = %q, want the earlier note kept and the new one appended", state.ExtraNotes)
 	}
+	prompt, err := renderPrompt("implement", map[string]string{
+		"REPO": "acme/app", "WORKTREE": "/tmp/worktree", "BASE": "master",
+		"RUN_DIR": "/tmp/run", "NUMBER": "5", "TITLE": "add a flag", "BODY": "add --json",
+		"COMMENTS": "(none)", "PLAN": "(missing plan)", "NOTES": strings.TrimSpace(state.ExtraNotes),
+		"BUG_INSTRUCTIONS": "", "LANGUAGE": "en",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prompt, "之前记下的补充\n顺便补个单测") {
+		t.Fatalf("rendered implement prompt omitted approval notes: %q", prompt)
+	}
+}
+func TestBlockedURLInstructionSavedAsNotes(t *testing.T) {
+	router, store, calls := newCommentRouter(t, "blocked", "failure")
+	router.HandleTrigger(context.Background(), "acme/app", commentTrigger("@bot 顺便看下 https://host/x?tab=readme 那段", "owner"))
+	if got := store.Issue("acme/app", 5).ExtraNotes; got != "顺便看下 https://host/x?tab=readme 那段" {
+		t.Fatalf("ExtraNotes = %q, want URL instruction", got)
+	}
+	if body, ok := postedCommentBody(t, calls); !ok || !strings.Contains(body, "记下了") {
+		t.Fatalf("reply = %q, present=%v; want notes-saved acknowledgement", body, ok)
+	}
 }
 
 // The failure reason in the question reply is bounded and an inner ``` fence
@@ -244,6 +266,108 @@ func TestQuoteOnlyCommentIgnored(t *testing.T) {
 	}
 	if _, ok := postedCommentBody(t, calls); ok {
 		t.Fatal("a reply comment was posted for a quote-only comment")
+	}
+}
+func hasIssueRead(calls *callLog) bool {
+	for _, call := range calls.snapshot() {
+		if call.method == http.MethodGet && strings.HasSuffix(call.path, "/issues/5") {
+			return true
+		}
+	}
+	return false
+}
+
+func TestQuoteReplyProseOnAwaitingApprovalRegeneratesPlan(t *testing.T) {
+	router, store, calls := newCommentRouter(t, "awaiting_approval", "")
+	router.HandleTrigger(context.Background(), "acme/app", commentTrigger(failureQuote+"\n\n改成用 flag 而不是 env", "owner"))
+	router.waitInactive(context.Background(), "acme/app#5", 5*time.Second)
+	if got := store.Issue("acme/app", 5).Phase; got != "awaiting_approval" {
+		t.Fatalf("phase = %q, want awaiting_approval", got)
+	}
+	if !reactedWith(t, calls, "eyes") {
+		t.Fatal("quoted feedback did not receive acknowledgment")
+	}
+	if !hasIssueRead(calls) {
+		t.Fatal("quoted plan feedback did not enqueue replanning")
+	}
+}
+func TestQuoteReplyProseOnPROpenRevises(t *testing.T) {
+	router, store, calls := newCommentRouter(t, "pr_open", "")
+	router.HandleTrigger(context.Background(), "acme/app", commentTrigger(failureQuote+"\n\n改成用 flag 而不是 env", "owner"))
+	router.waitInactive(context.Background(), "acme/app#5", 5*time.Second)
+	if got := store.Issue("acme/app", 5).Phase; got != "pr_open" {
+		t.Fatalf("phase = %q, want pr_open", got)
+	}
+	if !reactedWith(t, calls, "eyes") {
+		t.Fatal("quoted feedback did not receive acknowledgment")
+	}
+	if !hasIssueRead(calls) {
+		t.Fatal("quoted PR feedback did not enqueue revision")
+	}
+}
+func TestNonApproverMentionOnNewIssueDoesNotStartPlan(t *testing.T) {
+	router, store, calls := newCommentRouter(t, "new", "")
+	router.HandleTrigger(context.Background(), "acme/app", commentTrigger("@bot please help", "stranger"))
+	if got := store.Issue("acme/app", 5).Phase; got != "new" {
+		t.Fatalf("phase = %q, want new", got)
+	}
+	if !reactedWith(t, calls, "eyes") {
+		t.Fatal("non-approver mention did not receive eyes")
+	}
+	for _, call := range calls.snapshot() {
+		if call.method == http.MethodPost && strings.HasSuffix(call.path, "/issues/5/comments") {
+			t.Fatalf("unexpected action comment: %s", call.body)
+		}
+	}
+	if hasIssueRead(calls) {
+		t.Fatal("non-approver mention enqueued a plan")
+	}
+}
+
+func TestBlockedChatterIsNotSaved(t *testing.T) {
+	for _, body := range []string{"thanks", "looks good", "谢谢", "好的", "收到", "thanks, looks good", "thanks, looks good!", "thank you, looks good", "好的，谢谢"} {
+		t.Run(body, func(t *testing.T) {
+			router, store, _ := newCommentRouter(t, "blocked", "failure")
+			router.HandleTrigger(context.Background(), "acme/app", commentTrigger("@bot "+body, "owner"))
+			if got := store.Issue("acme/app", 5).ExtraNotes; got != "" {
+				t.Fatalf("ExtraNotes = %q, want empty", got)
+			}
+		})
+	}
+	t.Run("substantive content", func(t *testing.T) {
+		router, store, _ := newCommentRouter(t, "blocked", "failure")
+		body := "thanks, also fix the timeout"
+		router.HandleTrigger(context.Background(), "acme/app", commentTrigger("@bot "+body, "owner"))
+		if got := store.Issue("acme/app", 5).ExtraNotes; got == "" {
+			t.Fatal("ExtraNotes is empty, want substantive instruction")
+		}
+	})
+}
+func TestClosingCancelledIssueMarksClosed(t *testing.T) {
+	router, store, _ := newCommentRouter(t, "cancelled", "")
+	router.HandleClosed(context.Background(), "acme/app", Issue{Number: 5, State: "closed"})
+	router.waitInactive(context.Background(), "acme/app#5", 5*time.Second)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if store.Issue("acme/app", 5).IssueClosed {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("closing a cancelled issue did not set IssueClosed")
+}
+
+func TestReopeningCancelledIssueStartsFreshPlanning(t *testing.T) {
+	router, store, _ := newCommentRouter(t, "cancelled", "")
+	store.UpdateIssue("acme/app", 5, func(st *IssueState) {
+		st.Plan = "stale plan"
+		st.IssueClosed = true
+	})
+	router.HandleReopened(context.Background(), "acme/app", Issue{Number: 5, State: "open", User: User{Login: "owner"}})
+	router.waitInactive(context.Background(), "acme/app#5", 5*time.Second)
+	state := store.Issue("acme/app", 5)
+	if state.Phase != "new" || state.IssueClosed || state.CancelledAt != "" {
+		t.Fatalf("reopened state = %+v, want fresh new phase", state)
 	}
 }
 

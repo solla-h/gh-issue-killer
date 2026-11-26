@@ -110,15 +110,19 @@ func stripMention(text, login string) string {
 	return pattern.ReplaceAllString(text, " ")
 }
 
-// looksLikeQuestion is the heuristic the fall-through reply uses to tell a
-// question ("why did it fail?") from an instruction ("also fix the
-// timeout"). It only decides which canned reply fits; it never starts work.
-// English modal openers ("can ...", "do ...") are deliberately not treated as
-// questions: they usually introduce an instruction, and misclassifying one
-// drops it instead of saving it for the retry.
+// looksLikeQuestion distinguishes explicit questions from instructions. A
+// trailing question mark counts unless the text is a polite imperative;
+// question particles and openers remain supported. URL query strings are not
+// terminal punctuation and therefore do not count.
 func looksLikeQuestion(text string) bool {
 	trimmed := strings.TrimSpace(text)
-	if strings.Contains(trimmed, "?") || strings.Contains(trimmed, "？") {
+	if strings.HasSuffix(trimmed, "?") || strings.HasSuffix(trimmed, "？") {
+		lower := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(trimmed, "?"), "？")))
+		for _, prefix := range []string{"can you ", "could you ", "would you ", "will you ", "please "} {
+			if strings.HasPrefix(lower, prefix) {
+				return false
+			}
+		}
 		return true
 	}
 	lower := strings.ToLower(trimmed)
@@ -1110,7 +1114,7 @@ func (r *Router) HandleTrigger(ctx context.Context, fullName string, trigger Tri
 		// bot's own failure notice, which itself contains an "@agent
 		// continue" hint) must not address the agent or carry a command.
 		unquoted := stripQuotedLines(trigger.CommentBody)
-		mentioned := isMention(unquoted, r.agentLogin)
+		mentioned := isMention(unquoted, r.agentLogin) || (strings.TrimSpace(unquoted) != "" && isMention(trigger.CommentBody, r.agentLogin))
 		isApprover := selfComment
 		for _, login := range app.Repo.Approvers {
 			if strings.EqualFold(login, trigger.Sender) {
@@ -1122,7 +1126,7 @@ func (r *Router) HandleTrigger(ctx context.Context, fullName string, trigger Tri
 		// 👀 means "seen": every approver comment on a tracked issue gets
 		// one, and so does any @-mention from anyone else. What the bot
 		// writes or does beyond that still needs an approver mention.
-		if !selfComment && st.Phase != "" && (isApprover || mentioned) {
+		if !selfComment && ((st.Phase != "" && isApprover) || mentioned) {
 			react(ctx, app, trigger, "eyes")
 		}
 		r.log.Info("comment trigger %s#%d from @%s mentioned=%v command=%s", fullName, trigger.IssueNumber, trigger.Sender, mentioned, firstNonEmpty(command, "-"))
@@ -1223,7 +1227,7 @@ func (r *Router) HandleTrigger(ctx context.Context, fullName string, trigger Tri
 			return
 		}
 
-		if mentioned && (st.Phase == "" || st.Phase == "new") {
+		if mentioned && isApprover && (st.Phase == "" || st.Phase == "new") {
 			r.enqueue(fullName, key, stagePlan, func(jobCtx context.Context) {
 				issue, err := app.GH.GetIssue(jobCtx, fullName, trigger.IssueNumber)
 				if err != nil {
@@ -1300,7 +1304,7 @@ func (r *Router) HandleTrigger(ctx context.Context, fullName string, trigger Tri
 		}
 
 		// Feedback on a pending plan rewrites the plan instead of being dropped.
-		if mentioned && isApprover && st.Phase == "awaiting_approval" {
+		if mentioned && strings.TrimSpace(unquoted) != "" && isApprover && st.Phase == "awaiting_approval" {
 			r.enqueue(fullName, key, stagePlan, func(jobCtx context.Context) {
 				issue, err := app.GH.GetIssue(jobCtx, fullName, trigger.IssueNumber)
 				if err != nil {
@@ -1322,7 +1326,7 @@ func (r *Router) HandleTrigger(ctx context.Context, fullName string, trigger Tri
 
 		// A mention with prose (not a command) on an issue with an open PR is
 		// feedback: keep working on the same branch instead of merging.
-		if mentioned && isApprover && st.Phase == "pr_open" {
+		if mentioned && strings.TrimSpace(unquoted) != "" && isApprover && st.Phase == "pr_open" {
 			r.enqueue(fullName, key, stageWork, func(jobCtx context.Context) {
 				issue, err := app.GH.GetIssue(jobCtx, fullName, trigger.IssueNumber)
 				if err != nil {
@@ -1383,6 +1387,46 @@ func (r *Router) HandleTrigger(ctx context.Context, fullName string, trigger Tri
 	}
 }
 
+func isChatter(text string) bool {
+	words := strings.FieldsFunc(strings.ToLower(strings.TrimSpace(text)), func(r rune) bool {
+		switch r {
+		case ' ', '\t', '\r', '\n', '.', '!', '！', '?', '？', ',', '，', '。', '~', '～', '…':
+			return true
+		default:
+			return false
+		}
+	})
+	if len(words) == 0 {
+		return false
+	}
+	phrases := []string{"thank you so much", "looks good to me", "thanks a lot", "thank you", "looks good", "got it", "thanks", "thx", "lgtm", "good", "好的", "谢谢", "收到", "明白", "ok", "okay"}
+	for len(words) > 0 {
+		matched := false
+		for _, phrase := range phrases {
+			phraseWords := strings.Fields(phrase)
+			if len(phraseWords) > len(words) {
+				continue
+			}
+			equal := true
+			for i, word := range phraseWords {
+				if words[i] != word {
+					equal = false
+					break
+				}
+			}
+			if equal {
+				words = words[len(phraseWords):]
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
 // replyToComment posts a short collaborator reply on the issue. The body
 // comes from the scaffold catalogs, never from the comment text, so a
 // stranger's words can never steer what the bot writes.
@@ -1412,6 +1456,10 @@ func (r *Router) handleUnroutedComment(ctx context.Context, app *AppContext, ful
 	words := strings.TrimSpace(stripMention(unquoted, r.agentLogin))
 	if words == "" {
 		r.replyToComment(ctx, app, trigger, "router.reply.ack")
+		return
+	}
+	if isChatter(words) {
+		r.log.Info("comment on %s#%d ignored (chatter)", fullName, trigger.IssueNumber)
 		return
 	}
 	switch st.Phase {
@@ -1454,7 +1502,7 @@ func (r *Router) handleUnroutedComment(ctx context.Context, app *AppContext, ful
 
 func closablePhase(phase string) bool {
 	switch phase {
-	case "new", "planning", "implementing", "awaiting_approval", "blocked", "pr_open":
+	case "new", "planning", "implementing", "awaiting_approval", "blocked", "pr_open", "cancelled":
 		return true
 	}
 	return false
@@ -1497,8 +1545,8 @@ func (r *Router) HandleClosed(ctx context.Context, fullName string, issue Issue)
 	}()
 }
 
-// HandleReopened resumes a cancelled task. An existing plan returns to
-// awaiting_approval; without a plan it starts a fresh planning pass.
+// HandleReopened starts a fresh planning pass for cancelled issues, even when
+// an older plan exists; done issues also start a new round.
 func (r *Router) HandleReopened(ctx context.Context, fullName string, issue Issue) {
 	st := r.store.Issue(fullName, issue.Number)
 	if st.Phase != "cancelled" && st.Phase != "done" {
@@ -1522,14 +1570,6 @@ func (r *Router) HandleReopened(ctx context.Context, fullName string, issue Issu
 			state.MergedAt = ""
 			state.IssueClosed = false
 		})
-	} else if st.Plan != "" {
-		app.Store.UpdateIssue(fullName, issue.Number, func(state *IssueState) {
-			state.Phase = "awaiting_approval"
-			state.CancelledAt = ""
-			state.IssueClosed = false
-		})
-		app.GH.SetAgentState(ctx, fullName, issue.Number, awaitingLabel)
-		return
 	} else {
 		app.Store.UpdateIssue(fullName, issue.Number, func(state *IssueState) {
 			state.Phase = "new"

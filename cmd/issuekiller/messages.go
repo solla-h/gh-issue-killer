@@ -207,7 +207,7 @@ var scaffoldEN = map[string]string{
 	"router.reply.working":        "Got it — this round is still running; I'll post an update here when there's progress.",
 	"router.reply.merging":        "Got it — the merge is running; I'll report back when it finishes.",
 	"router.reply.done":           "This issue is already done; if there's follow-up work, reopen the issue or open a new one and I'll pick it up.",
-	"router.reply.cancelled":      "This issue's task was cancelled; to start over, close the issue and reopen it and I'll plan it again.",
+	"router.reply.cancelled":      "This issue's task was cancelled; to start over, close the issue and reopen it and I'll make a fresh plan.",
 }
 
 // language is the concrete scaffolding language for a task: an explicit
