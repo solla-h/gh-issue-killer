@@ -160,3 +160,31 @@ export interface UpdatePayload {
 	installed: boolean;
 	error?: string;
 }
+
+export type ProjectPermission = 'admin' | 'write' | 'triage' | 'read' | 'none' | 'unknown';
+
+export interface ProjectInfo {
+	name: string;
+	base: string;
+	agent: string;
+	model: string;
+	mode: string;
+	approvers: string[];
+	permission: ProjectPermission;
+	canPush: boolean;
+	canAdmin: boolean;
+	webhookReady: boolean;
+	hookId: number;
+	smee: string;
+	lastPoll: string;
+	accessUrl: string;
+	checkError?: string;
+}
+
+export interface ProjectsPayload {
+	bot: string;
+	config: string;
+	webhook: boolean;
+	repos: ProjectInfo[];
+	error?: string;
+}

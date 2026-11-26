@@ -123,6 +123,10 @@ Notes: personal repos cannot grant Admin to a collaborator — the daemon then
 creates no webhook and polls. Organization repos can. Do not grant more repos
 than $REPOS.
 
+The dashboard's **Projects** page (`/projects`) shows the same per-repo role and
+whether the token may manage webhooks, and links each repository to its
+collaborator settings, so a human can grant Write/Admin without a terminal.
+
 ## 3. Install — ENSURE
 
 Prebuilt archives (no Go needed): download the matching

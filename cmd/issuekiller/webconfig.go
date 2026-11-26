@@ -161,18 +161,9 @@ func (w *webServer) saveConfig(rw http.ResponseWriter, req *http.Request) {
 	if path == "" {
 		path = defaultConfigPath()
 	}
-	if err := normalizeConfigDocument(doc, path); err != nil {
-		w.writeJSON(rw, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
-		return
-	}
-	data, err := json.MarshalIndent(doc, "", "  ")
+	status, err := w.writeConfigDocument(doc)
 	if err != nil {
-		w.writeJSON(rw, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
-		return
-	}
-	data = append(data, '\n')
-	if err := atomicWriteFile(path, data); err != nil {
-		w.writeJSON(rw, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		w.writeJSON(rw, status, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
 	w.log.Info("web: wrote config %s", path)

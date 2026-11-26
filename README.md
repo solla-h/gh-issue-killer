@@ -112,7 +112,14 @@ release schedule — while a defaults strip shows the global agent, model and
 proxy; the config tab edits those global defaults (agent, model, proxy, update
 mirror, board port) and the updates tab shows the daemon's version, pid,
 identity, transport and config path. Any per-project field left on "follow
-global" keeps the override out of the config file. The board is a
+global" keeps the override out of the config file. A separate **Projects** page
+(the 看板/项目 switch in the header, `/projects`) lists every watched repository
+with the bot account's role on it, adds or removes a project, and flags the
+repositories where the bot lacks Write (no PRs) or Admin (no webhook), with a
+direct link to the repository's collaborator settings. Add and remove keep the
+config file's existing shape, validate it like the settings save, and restart
+the daemon.
+The board is a
 SvelteKit app in `frontend/` (Tailwind + shadcn-svelte theme); release binaries
 embed its build output, and a source build needs
 `npm --prefix frontend run build` first.

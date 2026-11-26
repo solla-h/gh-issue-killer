@@ -80,7 +80,9 @@ type webServer struct {
 	assets fs.FS
 	// latestRelease is replaced in tests so /api/update never hits GitHub.
 	latestRelease func(ctx context.Context) (*releaseInfo, error)
-	updateMu      sync.Mutex
+	// repoAccess is replaced in tests so /api/projects never hits GitHub.
+	repoAccess func(proxy *Proxy, repos []string) ([]repoAccessInfo, error)
+	updateMu   sync.Mutex
 	// authMu guards the in-flight Device Flow session; the token file itself is
 	// written atomically by saveTokenRecord.
 	authMu     sync.Mutex
@@ -168,6 +170,7 @@ func startWeb(cfg *Config, router *Router, store *Store, log *Logger, opts webOp
 	mux.HandleFunc("/api/action", web.handleAction)
 	mux.HandleFunc("/api/open-url", web.handleOpenURL)
 	mux.HandleFunc("/api/config", web.handleConfig)
+	mux.HandleFunc("/api/projects", web.handleProjects)
 	mux.HandleFunc("/api/auth", web.handleAuth)
 	mux.HandleFunc("/api/auth/device", web.handleAuthDevice)
 	mux.HandleFunc("/api/auth/token", web.handleAuthToken)

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import GalleryHorizontal from '@lucide/svelte/icons/gallery-horizontal';
 	import Languages from '@lucide/svelte/icons/languages';
@@ -14,7 +15,8 @@
 	import { cn, formatStars, humanAge, waitingNeedsAttention } from '#lib/utils.ts';
 	import Button from '#lib/components/ui/button.svelte';
 
-	let { onOpenSettings }: { onOpenSettings: () => void } = $props();
+	let { onOpenSettings, stats: showStats = true }: { onOpenSettings: () => void; stats?: boolean } =
+		$props();
 
 	const REPO_URL = 'https://github.com/uiautodev/issuekiller';
 	// Anonymous api.github.com allows 60 requests per hour and IP, so the count
@@ -61,6 +63,14 @@
 
 	function toggleLanguage(): void {
 		applyLanguage(i18n.lang === 'zh' ? 'en' : 'zh');
+	}
+
+	// The two pages are one app, so the switch is a pair of plain links: the
+	// client router keeps local state, and `aria-current` carries the selection
+	// beyond the colour of the active pill.
+	function navActive(href: string): boolean {
+		const path = page.url.pathname;
+		return href === '/' ? path === '/' : path === href || path.startsWith(href + '/');
 	}
 
 	onMount(() => {
@@ -145,6 +155,28 @@
 				</p>
 			</div>
 		</div>
+
+		<nav
+			class="flex items-center gap-0.5 rounded-lg border border-border bg-card p-0.5"
+			aria-label={t('nav.aria')}
+			data-testid="main-nav"
+		>
+			{#each [{ href: '/', label: 'nav.board', id: 'board' }, { href: '/projects', label: 'nav.projects', id: 'projects' }] as item (item.href)}
+				<a
+					href={item.href}
+					class={cn(
+						'inline-flex h-8 items-center rounded-md px-3 text-sm font-medium transition-colors',
+						navActive(item.href)
+							? 'bg-accent text-foreground shadow-xs'
+							: 'text-muted-foreground hover:bg-accent/60 hover:text-foreground'
+					)}
+					aria-current={navActive(item.href) ? 'page' : undefined}
+					data-testid={'nav-' + item.id}
+				>
+					{t(item.label)}
+				</a>
+			{/each}
+		</nav>
 
 		<div class="ml-auto flex flex-wrap items-center gap-1" data-testid="toolbar">
 			<a
@@ -236,43 +268,45 @@
 		</div>
 	</div>
 
-	<div class="border-t border-border/60 bg-card/40">
-		<dl
-			class="page-shell grid grid-cols-3 gap-x-4 gap-y-2 px-4 py-2 sm:grid-cols-5 sm:px-6"
-			data-testid="status-strip"
-		>
-			{#each stats as item}
-				<div class="flex min-w-0 flex-col">
-					<dt class="text-2xs tracking-[0.1em] text-muted-foreground uppercase">
-						{item.label}
-					</dt>
-					<dd
-						class="flex items-center font-sans text-lg leading-tight font-semibold tabular-nums"
-					>
-						{#if item.key === 'daemon'}
+	{#if showStats}
+		<div class="border-t border-border/60 bg-card/40">
+			<dl
+				class="page-shell grid grid-cols-3 gap-x-4 gap-y-2 px-4 py-2 sm:grid-cols-5 sm:px-6"
+				data-testid="status-strip"
+			>
+				{#each stats as item}
+					<div class="flex min-w-0 flex-col">
+						<dt class="text-2xs tracking-[0.1em] text-muted-foreground uppercase">
+							{item.label}
+						</dt>
+						<dd
+							class="flex items-center font-sans text-lg leading-tight font-semibold tabular-nums"
+						>
+							{#if item.key === 'daemon'}
+								<span
+									class={cn(
+										'mr-1.5 inline-block size-2 rounded-full',
+										dashboard.down ? 'bg-phase-blocked' : 'bg-phase-done'
+									)}
+									data-testid="daemon-lamp"
+								></span>
+							{/if}
 							<span
 								class={cn(
-									'mr-1.5 inline-block size-2 rounded-full',
-									dashboard.down ? 'bg-phase-blocked' : 'bg-phase-done'
+									'truncate text-sm font-medium sm:text-base',
+									item.attention &&
+										'rounded-md bg-phase-work/15 px-1.5 text-base font-bold text-phase-work sm:text-lg',
+									item.key === 'waiting' && !item.attention && 'font-normal text-muted-foreground/70'
 								)}
-								data-testid="daemon-lamp"
-							></span>
-						{/if}
-						<span
-							class={cn(
-								'truncate text-sm font-medium sm:text-base',
-								item.attention &&
-									'rounded-md bg-phase-work/15 px-1.5 text-base font-bold text-phase-work sm:text-lg',
-								item.key === 'waiting' && !item.attention && 'font-normal text-muted-foreground/70'
-							)}
-							data-testid={`stat-${item.key}`}
-							data-highlight={item.attention}
-						>
-							{item.value}
-						</span>
-					</dd>
-				</div>
-			{/each}
-		</dl>
-	</div>
+								data-testid={`stat-${item.key}`}
+								data-highlight={item.attention}
+							>
+								{item.value}
+							</span>
+						</dd>
+					</div>
+				{/each}
+			</dl>
+		</div>
+	{/if}
 </header>

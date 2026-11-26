@@ -170,6 +170,7 @@ dependencies.
 | `webauth.go` | dashboard login endpoints: Device Flow start/poll and pasted-token fallback |
 | `openurl.go` | opens an external http(s) link in the platform browser (`open`/`xdg-open`/`rundll32`) |
 | `webconfig.go` | settings API: `/api/config`, `/api/detect`, `/api/restart`, `/api/update` |
+| `webprojects.go` | projects API: `/api/projects` lists the watched repos with the bot account's role (`admin`/`write`/`triage`/`read`/`none`) and webhook state; POST adds or removes one repo, keeping the config's array/keyed shape and validating it through `loadConfig` |
 | `messages.go` | scaffolding text (headings, hints, footers) in Chinese/English, `app.text`, language detection |
 | `util.go` | paths (state-dir adoption, `envValue` for renamed variables), logger, atomic writes, `tailString`, small helpers |
 | `prompts/*.md` | stage prompts (embedded via `prompts/embed.go`) |
@@ -179,7 +180,7 @@ dependencies.
 | `assets/sponsor.png` | WeChat reward QR code shown at the end of `README.zh-CN.md` (not part of the build) |
 | `desktop/` | separate Go module: Wails 3 shell (`main.go`, `engine.go`, `engine_test.go`, `process_*.go`) and `build/` packaging (icon rendered from `frontend/static/logo.svg`, `.app`, DMG) |
 | `.agents/skills/modern-web-guidance/`, `skills-lock.json` | vendored GoogleChrome modern-web-guidance skill (SKILL.md + `guides/`) and its pinned commit, Apache-2.0 / CC-BY-4.0; search it before changing dashboard CSS, layout, tables, dialogs or theme handling |
-| `frontend/` | SvelteKit SPA for the dashboard: Tailwind v4 + shadcn-svelte tokens, zh/en strings, routes and `$lib` API/i18n/theme/layout modules (`dialog.ts` wraps native dialogs and the light-dismiss fallback, `repos.ts` normalises the watched-repo list, `components/ui/select.svelte` is the dependency-free listbox select); `npm run build` writes `cmd/issuekiller/web/dist` |
+| `frontend/` | SvelteKit SPA for the dashboard: Tailwind v4 + shadcn-svelte tokens, zh/en strings, routes and `$lib` API/i18n/theme/layout modules (`dialog.ts` wraps native dialogs and the light-dismiss fallback, `repos.ts` normalises the watched-repo list, `components/ui/select.svelte` is the dependency-free listbox select); `routes/projects/+page.svelte` is the projects screen (add/remove plus the bot's role per repo); `npm run build` writes `cmd/issuekiller/web/dist` |
 
 ## 5. State model and phases
 
@@ -605,13 +606,14 @@ and starts it again.
 
 ## 15. Web dashboard
 
-Loopback only. Routes: `/`, `/api/state`, `/api/issue`, `/api/logs`,
+Loopback only. Routes: `/`, `/projects`, `/api/state`, `/api/issue`, `/api/logs`,
 `/api/action` (approve/cancel), `/api/open-url` (open a dashboard link in the
 system browser), `/api/auth` (login status), `/api/auth/device` (POST starts
 Device Flow, GET polls), `/api/auth/token` (paste a PAT), `/api/config` (GET raw
 file + defaults, PUT
-validated save), `/api/detect` (installed agents, model list, optional proxy and
-repo-access probes), `/api/restart`, `/api/update` (GET checks
+validated save), `/api/projects` (GET the watched repos and the bot's role on
+each, POST `add`/`remove` one repo), `/api/detect` (installed agents, model list,
+optional proxy and repo-access probes), `/api/restart`, `/api/update` (GET checks
 `releases/latest`, POST installs). The mutating routes require
 a JSON content type and a loopback `Origin`; `/api/config` runs
 `loadConfig` against a temp file before it writes, so an invalid agent, repo,
@@ -634,8 +636,12 @@ to `index.html` for unknown non-asset paths. A missing `/assets/*` file is a
 404, and so is an unknown `/api/*` route. If `dist` contains no `index.html`
 the server returns a page that explains how to build the frontend.
 
-The layout is intentionally a two-row sticky masthead above a board: brand and
-primary actions on the first row, the live counters on the second. The
+The layout is intentionally a two-row sticky masthead above a board: brand,
+the board/projects switch and the primary actions on the first row, the live
+counters on the second. The switch is one segmented `<nav>` (two plain links,
+`aria-current="page"` for the selection) rather than a page-title link, so both
+screens are one tap apart; the counters row belongs to the board and the
+projects page passes `stats={false}` to drop it. The
 right-hand toolbar is a compact icon group: the GitHub link carries the
 repository's star count, then hairline dividers separate the settings, language
 and theme buttons. The icons stay visible at every width (the language button
@@ -721,6 +727,22 @@ pasted URLs, drops duplicates and keeps the visible order, and the three
 `repos` shapes (array, array of objects, object keyed by name) are preserved:
 a plain name list is only rewritten as objects when some repo actually
 overrides something (helpers in `$lib/repos.ts`).
+
+The projects page (`/projects`, the board/projects switch in the masthead) is the dedicated place to
+add or remove a repository and to see whether the bot account can actually work
+in it. `GET /api/projects` asks GitHub for the token's role per repo
+(`admin`/`write`/`triage`/`read`/`none`) plus whether it may manage hooks, and
+the page explains the gap: without Write the bot cannot push branches or open
+PRs, without Admin it cannot create its own webhook (an externally managed one
+still streams). Missing access gets a guidance block with a button to the
+repository's `settings/access` page and the bot login, so the main account knows
+exactly whom to invite and with which role. Add verifies the repo is visible to
+the token before writing, then saves through the same `loadConfig` validation
+and restarts the daemon; remove keeps the other entries and their overrides.
+Both POST as `{action, repo}` and share `writeConfigDocument` with the settings
+save. Because the listener goes away for the restart, the page retries
+`/api/projects` until the new process answers instead of showing a daemon-down
+error.
 
 The config tab holds the global defaults and system knobs: coding agent (the
 same select, populated from `/api/detect`, keeping a configured agent that is
@@ -818,6 +840,7 @@ keeps tests quiet. Notable coverage:
 | `oauth_test.go` | Device Flow pending/slow_down/expired, token file 0600, refresh success/failure, credential precedence, 401 retry, login/paste endpoints, login panel markup |
 | `openurl_test.go` | per-platform browser command, no shell, injected runner |
 | `webconfig_test.go` | `/api/config` validation/round-trip/origin check, `release` defaults and rejection, `/api/detect` degradation, `/api/update` payload, snapshot without a router |
+| `webprojects_test.go` | `/api/projects` role payload and access URL, add verifies GitHub first and leaves the file untouched on failure, remove keeps the other repos and their overrides, all three `repos` shapes, origin check |
 | `selfupdate_test.go` | version ordering, asset selection, mirror/digest parsing, archive extraction, checksum mismatch keeps the binary |
 | `wizard_test.go` | `-init` setup wizard flows |
 | `logs_test.go`, `logging_test.go` | log rotation, follower, daemonize helpers |

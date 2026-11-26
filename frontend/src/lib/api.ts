@@ -65,6 +65,22 @@ export async function getDetect(params: URLSearchParams) {
 	return response.json();
 }
 
+export async function getProjects() {
+	const response = await fetch('/api/projects', { cache: 'no-store' });
+	if (!response.ok) throw new Error(await errorMessage(response));
+	return response.json();
+}
+
+export async function postProject(action: 'add' | 'remove', repo: string) {
+	const response = await fetch('/api/projects', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ action, repo })
+	});
+	if (!response.ok) throw new Error(await errorMessage(response));
+	return response.json();
+}
+
 export async function postRestart() {
 	const response = await fetch('/api/restart', {
 		method: 'POST',
