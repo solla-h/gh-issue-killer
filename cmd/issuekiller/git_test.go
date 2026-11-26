@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -20,7 +21,7 @@ func TestPushBranchToDifferentNames(t *testing.T) {
 		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
 		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
 	)
-	envFunc := func() []string { return env }
+	envFunc := func() ([]string, string) { return env, "" }
 	root := t.TempDir()
 	remote := filepath.Join(root, "remote.git")
 	work := filepath.Join(root, "work")
@@ -138,13 +139,16 @@ func TestGitWithAuthRetryFollowsRotation(t *testing.T) {
 
 	token := "gho_first"
 	var seen []string
-	env := func() []string {
+	env := func() ([]string, string) {
 		seen = append(seen, token)
-		return buildGitEnv(nil, token, User{})
+		return buildGitEnv(nil, token, User{}), token
 	}
 	rotations := 0
-	rotate := func(context.Context) bool {
+	rotate := func(_ context.Context, failed string) bool {
 		rotations++
+		if failed != "gho_first" {
+			t.Fatalf("failed token = %q, want gho_first", failed)
+		}
 		token = "gho_second"
 		return true
 	}
@@ -161,15 +165,43 @@ func TestGitWithAuthRetryFollowsRotation(t *testing.T) {
 	}
 }
 
+func TestGitWithAuthRetryUsesRotatedTokenAfterRefreshError(t *testing.T) {
+	bin := t.TempDir()
+	gitPath := filepath.Join(bin, "git")
+	script := "#!/bin/sh\nif [ \"$TOKEN\" = gho_first ]; then\n  echo 'fatal: Authentication failed' >&2\n  exit 128\nfi\nexit 0\n"
+	if err := os.WriteFile(gitPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TOKEN", "gho_first")
+
+	token := "gho_first"
+	local := &LocalRepo{
+		token: func() string { return token },
+		refresh: func(_ context.Context, failed string) (string, error) {
+			if failed != "gho_first" {
+				t.Fatalf("failed token = %q, want gho_first", failed)
+			}
+			token = "gho_second"
+			t.Setenv("TOKEN", token)
+			return "", fmt.Errorf("another refresh already rotated token")
+		},
+	}
+	result, err := gitWithAuthRetry(context.Background(), t.TempDir(), local.gitEnvWithToken, local.refreshToken, 30*time.Second, false, "status")
+	if err != nil || result.Code != 0 || token != "gho_second" {
+		t.Fatalf("retry result = %+v, err = %v, token = %q; want success with gho_second", result, err, token)
+	}
+}
+
 // An ordinary git failure must not rotate the token or run the command twice.
 func TestGitWithAuthRetryIgnoresOtherFailures(t *testing.T) {
 	rotations := 0
 	envCalls := 0
-	env := func() []string {
+	env := func() ([]string, string) {
 		envCalls++
-		return os.Environ()
+		return os.Environ(), ""
 	}
-	rotate := func(context.Context) bool {
+	rotate := func(context.Context, string) bool {
 		rotations++
 		return true
 	}
@@ -191,7 +223,7 @@ func TestAppContextRefreshTokenRotates(t *testing.T) {
 		return "gho_second", nil
 	}}
 	app := &AppContext{GH: gh, Log: NewSilentLogger()}
-	if !app.refreshToken(context.Background()) {
+	if !app.refreshToken(context.Background(), "gho_first") {
 		t.Fatal("refreshToken = false, want true after a rotation")
 	}
 	if got := gh.currentToken(); got != "gho_second" {
@@ -200,8 +232,28 @@ func TestAppContextRefreshTokenRotates(t *testing.T) {
 	if refreshes != 1 {
 		t.Fatalf("refreshes = %d, want 1", refreshes)
 	}
-	if (&AppContext{}).refreshToken(context.Background()) {
+	if (&AppContext{}).refreshToken(context.Background(), "gho_first") {
 		t.Fatal("a context without GH cannot refresh")
+	}
+}
+
+func TestAppContextRefreshTokenReusesConcurrentRotation(t *testing.T) {
+	refreshes := 0
+	gh := &GH{Token: "gho_first", Log: NewSilentLogger(), refresh: func(context.Context) (string, error) {
+		refreshes++
+		return "gho_second", nil
+	}}
+	app := &AppContext{GH: gh, Log: NewSilentLogger()}
+	for range 2 {
+		if !app.refreshToken(context.Background(), "gho_first") {
+			t.Fatal("refreshToken = false, want existing rotated token")
+		}
+	}
+	if refreshes != 1 {
+		t.Fatalf("refreshes = %d, want 1 for concurrent failures using the same token", refreshes)
+	}
+	if got := gh.currentToken(); got != "gho_second" {
+		t.Fatalf("token = %q, want gho_second", got)
 	}
 }
 
@@ -218,7 +270,7 @@ func TestLocalRepoRefreshTokenUsesHook(t *testing.T) {
 			return token, nil
 		},
 	}
-	if !local.refreshToken(context.Background()) {
+	if !local.refreshToken(context.Background(), "gho_first") {
 		t.Fatal("refreshToken = false, want true")
 	}
 	if failed != "gho_first" {
@@ -227,7 +279,7 @@ func TestLocalRepoRefreshTokenUsesHook(t *testing.T) {
 	if token != "gho_second" {
 		t.Fatalf("token = %q, want gho_second", token)
 	}
-	if local.refreshToken(context.Background()) {
+	if local.refreshToken(context.Background(), "gho_second") {
 		t.Fatal("refreshToken = true when the value did not change")
 	}
 }

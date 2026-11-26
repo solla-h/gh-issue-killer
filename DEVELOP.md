@@ -491,14 +491,14 @@ are unavailable the poller is the fallback; both funnel into `Router.Handle*`.
   branch `agent/issue-<n>-<short id>`; removed with `--force` after merge or
   cancel.
 - Commits use the bot identity (`<id>+<login>@users.noreply.github.com`).
-- Push uses a one-shot `http.extraheader` with the token, rebuilt from the
-  live token (`GH.currentToken`) for every git operation and every child
-  process; nothing is written to any gitconfig. An environment captured at
-  startup would keep authenticating with the token from before its rotation.
-  A git command can be the first consumer to meet the expiry (a webhook job
-  right at expiry): `gitRun` and `pushBranchTo` recognise 401 / “could not
-  read Username … terminal prompts disabled”, rotate through
-  `GH.refreshAfterUnauthorized` and retry once with the rebuilt environment.
+- Pushes use a one-shot `http.extraheader` with the live token, rebuilt for each
+  git operation and child process; nothing is written to any gitconfig. Each
+  authenticated git command captures the token embedded in its first
+  environment and passes that exact value to `GH.refreshAfterUnauthorized` on a
+  401, avoiding a redundant refresh when another goroutine already rotated it.
+  If refresh errors after a concurrent rotation, the command still retries once
+  with the live token. The worktree-ahead check also retries its branch fetch on
+  auth failure and reports fetch errors instead of treating them as “not ahead”.
   The `followMaster` watcher (§16) takes the same kind of factory, so its
   `ls-remote` and clone also follow a rotation.
 - `plan` uses a temporary detached worktree under `tmp/`.

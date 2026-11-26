@@ -50,7 +50,10 @@ func TestWorktreeAheadOfPR(t *testing.T) {
 	localHead := gitOutput(ctx, work, env, time.Minute, "rev-parse", "HEAD")
 
 	local := &LocalRepo{HTTPSURL: remote}
-	ahead, head := worktreeAheadOfPR(ctx, work, local, "main", remoteHead)
+	ahead, head, err := worktreeAheadOfPR(ctx, work, local, "main", remoteHead)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !ahead {
 		t.Fatal("ahead = false, want true for an unpushed local commit")
 	}
@@ -59,8 +62,14 @@ func TestWorktreeAheadOfPR(t *testing.T) {
 	}
 
 	mustGit(work, "push", "-q", "origin", "main")
-	ahead, _ = worktreeAheadOfPR(ctx, work, local, "main", localHead)
+	ahead, _, err = worktreeAheadOfPR(ctx, work, local, "main", localHead)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if ahead {
 		t.Fatal("ahead = true after the commit was pushed")
+	}
+	if ahead, _, err := worktreeAheadOfPR(ctx, work, local, "missing-branch", remoteHead); err == nil || ahead {
+		t.Fatalf("ahead = %v, err = %v, want fetch failure error", ahead, err)
 	}
 }

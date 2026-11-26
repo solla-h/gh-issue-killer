@@ -36,30 +36,32 @@ type AppContext struct {
 // startup would authenticate git and gh with an expired token. GH is the only
 // source in production; a context without a client (tests) gets no token
 // rather than a snapshot that could go stale.
-func (a *AppContext) Env() []string {
+func (a *AppContext) envWithToken() ([]string, string) {
 	token := ""
 	if a.GH != nil {
 		token = a.GH.currentToken()
 	}
 	overrides := goProxyEnv(a.Proxy)
-	// Agents and their tools may call gh directly. Give them the bot token
-	// instead of a separate config directory, so they can never fall back to
-	// the human account.
 	overrides["GH_TOKEN"] = token
 	overrides["GITHUB_TOKEN"] = token
-	return mergeEnv(buildGitEnv(a.Proxy, token, a.Identity), overrides)
+	return mergeEnv(buildGitEnv(a.Proxy, token, a.Identity), overrides), token
 }
 
-// refreshToken rotates the bot token after git met an expired one and reports
-// whether a retry has a new value. A git command can be the first consumer to
-// see the expiry, before the API's 401 path has rotated anything.
-func (a *AppContext) refreshToken(ctx context.Context) bool {
+func (a *AppContext) Env() []string {
+	env, _ := a.envWithToken()
+	return env
+}
+
+func (a *AppContext) refreshToken(ctx context.Context, failed string) bool {
 	if a.GH == nil {
 		return false
 	}
-	failed := a.GH.currentToken()
 	token, err := a.GH.refreshAfterUnauthorized(ctx, failed)
 	if err != nil {
+		live := a.GH.currentToken()
+		if live != "" && live != failed {
+			return true
+		}
 		if a.Log != nil {
 			a.Log.Warn("git token refresh failed: %v", err)
 		}
@@ -1141,7 +1143,7 @@ func doModifyPR(ctx context.Context, app *AppContext, trigger Trigger, pr PullRe
 		postReviewFailure(ctx, app, number, fmt.Errorf("commit: %w", err))
 		return
 	}
-	if err := pushBranchTo(ctx, worktree, prPushURL(app, pr), app.Env, app.refreshToken, branch, pr.Head.Ref); err != nil {
+	if err := pushBranchTo(ctx, worktree, prPushURL(app, pr), app.envWithToken, app.refreshToken, branch, pr.Head.Ref); err != nil {
 		postReviewFailure(ctx, app, number, fmt.Errorf("push to %s: %w", pr.Head.Repo.FullName, err))
 		return
 	}
@@ -1827,7 +1829,9 @@ func ciGateWithRepairs(ctx context.Context, app *AppContext, issue Issue, st Iss
 	// it (for example an agent that commits on its own). Publish it before
 	// gating, or the gate keeps checking the old head forever.
 	if st.Worktree != "" && pr.Head.SHA != "" {
-		if ahead, head := worktreeAheadOfPR(ctx, st.Worktree, app.Local, st.Branch, pr.Head.SHA); ahead {
+		if ahead, head, aheadErr := worktreeAheadOfPR(ctx, st.Worktree, app.Local, st.Branch, pr.Head.SHA); aheadErr != nil {
+			app.Log.Warn("check stranded commits for %s#%d: %v", app.Repo.FullName, number, aheadErr)
+		} else if ahead {
 			app.Log.Info("publishing stranded commit %s for %s#%d", shortSHA(head), app.Repo.FullName, number)
 			if err := pushBranch(ctx, st.Worktree, app.Local, st.Branch); err == nil {
 				if refreshed, refreshErr := waitForPRHead(ctx, app, st.PRNumber, head, 2*time.Minute); refreshErr == nil {
@@ -1889,19 +1893,23 @@ func ciGateWithRepairs(ctx context.Context, app *AppContext, issue Issue, st Iss
 
 // worktreeAheadOfPR reports whether the worktree HEAD is a descendant of the
 // given PR commit, i.e. it holds commits that were never pushed.
-func worktreeAheadOfPR(ctx context.Context, worktree string, local *LocalRepo, branch, prSHA string) (bool, string) {
+func worktreeAheadOfPR(ctx context.Context, worktree string, local *LocalRepo, branch, prSHA string) (bool, string, error) {
 	head := headSHA(ctx, worktree, local.gitEnv())
 	if head == "" || head == prSHA {
-		return false, ""
+		return false, "", nil
 	}
-	if _, err := gitWorktree(ctx, worktree, local.gitEnv(), 2*time.Minute, true, "fetch", local.HTTPSURL, branch); err != nil {
-		return false, ""
+	result, err := gitWithAuthRetry(ctx, worktree, local.gitEnvWithToken, local.refreshToken, 2*time.Minute, false, "fetch", local.HTTPSURL, branch)
+	if err != nil {
+		return false, "", fmt.Errorf("fetch PR branch before checking worktree: %w", err)
+	}
+	if result.Code != 0 {
+		return false, "", fmt.Errorf("fetch PR branch before checking worktree: git exited %d: %s", result.Code, strings.TrimSpace(result.Stderr))
 	}
 	ancestor, err := gitWorktree(ctx, worktree, local.gitEnv(), 30*time.Second, true, "merge-base", "--is-ancestor", prSHA, "HEAD")
 	if err != nil || ancestor.Code != 0 {
-		return false, ""
+		return false, "", nil
 	}
-	return true, head
+	return true, head, nil
 }
 
 // ciRepairRound runs the coding agent once in the PR's worktree with the
@@ -2254,7 +2262,7 @@ func resolveConflictsIn(ctx context.Context, app *AppContext, target conflictTar
 	if err := commitAll(ctx, worktree, app.Env(), fmt.Sprintf("chore: resolve conflicts with %s for #%d", app.Local.Base, number)); err != nil {
 		return fmt.Errorf("commit conflict resolution: %w", err)
 	}
-	if err := pushBranchTo(ctx, worktree, target.RemoteURL, app.Env, app.refreshToken, target.LocalBranch, target.RemoteBranch); err != nil {
+	if err := pushBranchTo(ctx, worktree, target.RemoteURL, app.envWithToken, app.refreshToken, target.LocalBranch, target.RemoteBranch); err != nil {
 		return fmt.Errorf("push conflict resolution: %w", err)
 	}
 	return nil
