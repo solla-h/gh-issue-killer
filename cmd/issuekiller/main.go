@@ -349,7 +349,6 @@ func main() {
 		log.Error("github client: %v", err)
 		os.Exit(1)
 	}
-	token := gh.Token
 	identity := gh.Agent
 	log.Info("agent identity: @%s (%s)", identity.Login, identity.NoreplyEmail())
 	if cfg.DeprecatedAgent != "" {
@@ -391,7 +390,7 @@ func main() {
 		if !info.Permissions.Push {
 			log.Warn("%s: the GitHub token has no push access; PRs/merges will fail", repo.FullName)
 		}
-		local, err := resolveRepo(ctx, repo, info, identity, gh.currentToken, proxy)
+		local, err := resolveRepo(ctx, repo, info, identity, gh.currentToken, gh.refreshAfterUnauthorized, proxy)
 		if err != nil {
 			log.Warn("repo %s: %v (skipping)", repo.FullName, err)
 			continue
@@ -404,7 +403,6 @@ func main() {
 			RepoInfo:   info,
 			Local:      local,
 			Identity:   identity,
-			Token:      token,
 			Proxy:      proxy,
 			GH:         gh,
 			Store:      nil,
@@ -466,12 +464,15 @@ func main() {
 	var selfRestart <-chan struct{}
 	var masterRestart <-chan struct{}
 	if cfg.FollowMaster {
-		env := os.Environ()
+		// The watcher runs for the daemon's lifetime, so it gets a factory
+		// rather than one environment: its git calls must follow token
+		// rotations exactly like job git operations do.
+		masterEnv := func() []string { return os.Environ() }
 		for _, app := range contexts {
-			env = app.Env()
+			masterEnv = app.Env
 			break
 		}
-		masterRestart = watchMaster(ctx, log, env)
+		masterRestart = watchMaster(ctx, log, masterEnv)
 		if cfg.SelfUpdate {
 			log.Warn("config: followMaster is on; release installs are skipped while following master")
 		}

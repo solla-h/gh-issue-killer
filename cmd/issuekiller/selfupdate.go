@@ -506,7 +506,7 @@ func masterWatchBaseline(head, buildCommit string) string {
 	return buildCommit
 }
 
-func watchMaster(ctx context.Context, log *Logger, env []string) <-chan struct{} {
+func watchMaster(ctx context.Context, log *Logger, env func() []string) <-chan struct{} {
 	ready := make(chan struct{}, 1)
 	go func() {
 		head := remoteMasterHead(ctx, env)
@@ -549,13 +549,13 @@ func watchMaster(ctx context.Context, log *Logger, env []string) <-chan struct{}
 	return ready
 }
 
-func remoteMasterHead(ctx context.Context, env []string) string {
+func remoteMasterHead(ctx context.Context, env func() []string) string {
 	git, err := gitBinary()
 	if err != nil {
 		return ""
 	}
 	result, err := runCmd(ctx, git, []string{"ls-remote", masterRepoURL, "refs/heads/" + masterBranch}, CmdOptions{
-		Env:          env,
+		Env:          env(),
 		Timeout:      30 * time.Second,
 		AllowFailure: true,
 	})
@@ -576,7 +576,7 @@ func headFromLSRemote(out string) string {
 // rebuildFromMaster builds the latest master in a dedicated clone and replaces
 // the running executable. The build goes to a temporary file first, so a failed
 // build never replaces a working binary.
-func rebuildFromMaster(ctx context.Context, log *Logger, env []string, head string) error {
+func rebuildFromMaster(ctx context.Context, log *Logger, env func() []string, head string) error {
 	git, err := gitBinary()
 	if err != nil {
 		return err
@@ -601,7 +601,7 @@ func rebuildFromMaster(ctx context.Context, log *Logger, env []string, head stri
 		_ = os.RemoveAll(dir)
 		log.Info("master update: cloning %s into %s", masterRepoURL, dir)
 		if _, err := runCmd(ctx, git, []string{"clone", "--depth", "1", "--branch", masterBranch, masterRepoURL, dir}, CmdOptions{
-			Env:     env,
+			Env:     env(),
 			Timeout: 10 * time.Minute,
 		}); err != nil {
 			return fmt.Errorf("clone: %w", err)
@@ -609,18 +609,18 @@ func rebuildFromMaster(ctx context.Context, log *Logger, env []string, head stri
 	}
 	if _, err := runCmd(ctx, git, []string{"-C", dir, "fetch", "--depth", "1", "origin",
 		"+refs/heads/" + masterBranch + ":refs/remotes/origin/" + masterBranch}, CmdOptions{
-		Env:     env,
+		Env:     env(),
 		Timeout: 5 * time.Minute,
 	}); err != nil {
 		return fmt.Errorf("fetch: %w", err)
 	}
 	if _, err := runCmd(ctx, git, []string{"-C", dir, "reset", "--hard", "origin/" + masterBranch}, CmdOptions{
-		Env:     env,
+		Env:     env(),
 		Timeout: time.Minute,
 	}); err != nil {
 		return fmt.Errorf("checkout: %w", err)
 	}
-	if err := buildDashboard(ctx, log, npmBin, dir, env); err != nil {
+	if err := buildDashboard(ctx, log, npmBin, dir, env()); err != nil {
 		return err
 	}
 
@@ -629,7 +629,7 @@ func rebuildFromMaster(ctx context.Context, log *Logger, env []string, head stri
 		"-ldflags", "-X main.commit=" + head,
 		"-o", tmp, "./cmd/issuekiller"}, CmdOptions{
 		Cwd:     dir,
-		Env:     env,
+		Env:     env(),
 		Timeout: 10 * time.Minute,
 	}); err != nil {
 		_ = os.Remove(tmp)

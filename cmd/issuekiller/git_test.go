@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +20,7 @@ func TestPushBranchToDifferentNames(t *testing.T) {
 		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
 		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
 	)
+	envFunc := func() []string { return env }
 	root := t.TempDir()
 	remote := filepath.Join(root, "remote.git")
 	work := filepath.Join(root, "work")
@@ -35,7 +38,7 @@ func TestPushBranchToDifferentNames(t *testing.T) {
 	mustGit(work, "add", "a.txt")
 	mustGit(work, "commit", "-q", "-m", "one")
 
-	if err := pushBranchTo(ctx, work, remote, env, "main", "feature-x"); err != nil {
+	if err := pushBranchTo(ctx, work, remote, envFunc, nil, "main", "feature-x"); err != nil {
 		t.Fatalf("push local main to remote feature-x: %v", err)
 	}
 	if got := gitOutput(ctx, remote, env, time.Minute, "rev-parse", "--verify", "refs/heads/feature-x"); got == "" {
@@ -121,5 +124,128 @@ func TestAppContextEnvFollowsTokenRotation(t *testing.T) {
 	}
 	if got := envEntryValue(app.Env(), "GITHUB_TOKEN"); got != "gho_second" {
 		t.Fatalf("GITHUB_TOKEN after rotation = %q, want gho_second", got)
+	}
+}
+
+// gitWithAuthRetry exists because git can be the first consumer to meet an
+// expired token: a webhook job right at expiry would otherwise fail before the
+// API poll notices the 401. It must rotate once and retry with a rebuilt env.
+func TestGitWithAuthRetryFollowsRotation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	token := "gho_first"
+	var seen []string
+	env := func() []string {
+		seen = append(seen, token)
+		return buildGitEnv(nil, token, User{})
+	}
+	rotations := 0
+	rotate := func(context.Context) bool {
+		rotations++
+		token = "gho_second"
+		return true
+	}
+	_, err := gitWithAuthRetry(context.Background(), t.TempDir(), env, rotate, 30*time.Second, false,
+		"ls-remote", server.URL+"/repo.git")
+	if err == nil {
+		t.Fatal("unauthenticated remote should still fail after one retry")
+	}
+	if rotations != 1 {
+		t.Fatalf("rotations = %d, want 1", rotations)
+	}
+	if len(seen) != 2 || seen[0] != "gho_first" || seen[1] != "gho_second" {
+		t.Fatalf("environments built for %v, want [gho_first gho_second]", seen)
+	}
+}
+
+// An ordinary git failure must not rotate the token or run the command twice.
+func TestGitWithAuthRetryIgnoresOtherFailures(t *testing.T) {
+	rotations := 0
+	envCalls := 0
+	env := func() []string {
+		envCalls++
+		return os.Environ()
+	}
+	rotate := func(context.Context) bool {
+		rotations++
+		return true
+	}
+	_, err := gitWithAuthRetry(context.Background(), t.TempDir(), env, rotate, 30*time.Second, false,
+		"rev-parse", "--verify", "refs/heads/missing")
+	if err == nil {
+		t.Fatal("missing ref should fail")
+	}
+	if rotations != 0 || envCalls != 1 {
+		t.Fatalf("rotations = %d envCalls = %d, want 0 and 1", rotations, envCalls)
+	}
+}
+
+// A git-first 401 rotates through the same GH refresh the API path uses.
+func TestAppContextRefreshTokenRotates(t *testing.T) {
+	refreshes := 0
+	gh := &GH{Token: "gho_first", Log: NewSilentLogger(), refresh: func(context.Context) (string, error) {
+		refreshes++
+		return "gho_second", nil
+	}}
+	app := &AppContext{GH: gh, Log: NewSilentLogger()}
+	if !app.refreshToken(context.Background()) {
+		t.Fatal("refreshToken = false, want true after a rotation")
+	}
+	if got := gh.currentToken(); got != "gho_second" {
+		t.Fatalf("token = %q, want gho_second", got)
+	}
+	if refreshes != 1 {
+		t.Fatalf("refreshes = %d, want 1", refreshes)
+	}
+	if (&AppContext{}).refreshToken(context.Background()) {
+		t.Fatal("a context without GH cannot refresh")
+	}
+}
+
+// LocalRepo hands the failed token to the GH refresh hook and only reports a
+// retry when the value actually changed.
+func TestLocalRepoRefreshTokenUsesHook(t *testing.T) {
+	token := "gho_first"
+	var failed string
+	local := &LocalRepo{
+		token: func() string { return token },
+		refresh: func(_ context.Context, stale string) (string, error) {
+			failed = stale
+			token = "gho_second"
+			return token, nil
+		},
+	}
+	if !local.refreshToken(context.Background()) {
+		t.Fatal("refreshToken = false, want true")
+	}
+	if failed != "gho_first" {
+		t.Fatalf("refresh failed token = %q, want gho_first", failed)
+	}
+	if token != "gho_second" {
+		t.Fatalf("token = %q, want gho_second", token)
+	}
+	if local.refreshToken(context.Background()) {
+		t.Fatal("refreshToken = true when the value did not change")
+	}
+}
+
+// The live failure from the bug report and GitHub's 401 wording must both be
+// recognised; a plain missing ref must not be mistaken for an auth failure.
+func TestGitAuthFailedMarkers(t *testing.T) {
+	for _, stderr := range []string{
+		"fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+		"fatal: unable to access 'https://github.com/acme/app.git/': The requested URL returned error: 401",
+		"remote: Invalid username or password.",
+		"fatal: Authentication failed for 'https://github.com/acme/app.git/'",
+	} {
+		if !gitAuthFailed(CmdResult{Code: 128, Stderr: stderr}) {
+			t.Fatalf("gitAuthFailed(%q) = false, want true", stderr)
+		}
+	}
+	if gitAuthFailed(CmdResult{Code: 128, Stderr: "fatal: couldn't find remote ref refs/pull/1/head"}) {
+		t.Fatal("a missing ref must not trigger a token refresh")
 	}
 }

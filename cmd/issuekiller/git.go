@@ -23,6 +23,9 @@ type LocalRepo struct {
 	proxy    *Proxy
 	identity User
 	token    func() string
+	// refresh rotates the token after git itself met an expired one; it is
+	// GH.refreshAfterUnauthorized in production and nil in tests.
+	refresh func(ctx context.Context, failed string) (string, error)
 }
 
 // gitEnv rebuilds the git environment with the current token. Git auth is a
@@ -34,6 +37,58 @@ func (l *LocalRepo) gitEnv() []string {
 		token = l.token()
 	}
 	return buildGitEnv(l.proxy, token, l.identity)
+}
+
+// refreshToken rotates the bot token after git met an expired one and reports
+// whether a retry has a new value. Git can be the first consumer to see the
+// expiry (a webhook job right at expiry), so the retry cannot wait for the API
+// poll to notice its 401.
+func (l *LocalRepo) refreshToken(ctx context.Context) bool {
+	if l.refresh == nil || l.token == nil {
+		return false
+	}
+	failed := l.token()
+	token, err := l.refresh(ctx, failed)
+	return err == nil && token != "" && token != failed
+}
+
+// gitAuthFailed tells an expired-token failure from any other git error. The
+// token is a one-shot extraheader, so GitHub answers 401; with
+// GIT_TERMINAL_PROMPT=0 git can also turn that into a username prompt.
+func gitAuthFailed(result CmdResult) bool {
+	text := strings.ToLower(result.Stderr)
+	for _, marker := range []string{
+		"returned error: 401",
+		"401 unauthorized",
+		"authentication failed",
+		"could not read username",
+		"terminal prompts disabled",
+		"invalid username or password",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// gitWithAuthRetry runs one git command and retries it once with a rebuilt
+// environment when the failure was an expired token. env is a factory so the
+// retry picks up the value rotate stored; rotate returns false when the
+// credential cannot be refreshed (env tokens have no refresh token), in which
+// case the original failure is returned unchanged.
+func gitWithAuthRetry(ctx context.Context, cwd string, env func() []string, rotate func(context.Context) bool, timeout time.Duration, allowFailure bool, args ...string) (CmdResult, error) {
+	git, err := gitBinary()
+	if err != nil {
+		return CmdResult{}, err
+	}
+	opts := CmdOptions{Cwd: cwd, Env: env(), Timeout: timeout, AllowFailure: allowFailure}
+	result, err := runCmd(ctx, git, args, opts)
+	if result.Code == 0 || !gitAuthFailed(result) || rotate == nil || !rotate(ctx) {
+		return result, err
+	}
+	opts.Env = env()
+	return runCmd(ctx, git, args, opts)
 }
 
 func gitBinary() (string, error) {
@@ -66,7 +121,7 @@ func buildGitEnv(proxy *Proxy, token string, identity User) []string {
 	return mergeEnv(os.Environ(), overrides, "GH_TOKEN", "GITHUB_TOKEN")
 }
 
-func resolveRepo(ctx context.Context, repo RepoConfig, info RepoInfo, identity User, token func() string, proxy *Proxy) (*LocalRepo, error) {
+func resolveRepo(ctx context.Context, repo RepoConfig, info RepoInfo, identity User, token func() string, refresh func(ctx context.Context, failed string) (string, error), proxy *Proxy) (*LocalRepo, error) {
 	env := buildGitEnv(proxy, token(), identity)
 	httpsURL := fmt.Sprintf("https://github.com/%s.git", repo.FullName)
 	cloneDir := filepath.Join(reposDir(), repo.Owner+"-"+repo.Name)
@@ -119,20 +174,12 @@ func resolveRepo(ctx context.Context, repo RepoConfig, info RepoInfo, identity U
 		proxy:        proxy,
 		identity:     identity,
 		token:        token,
+		refresh:      refresh,
 	}, nil
 }
 
 func gitRun(ctx context.Context, local *LocalRepo, timeout time.Duration, allowFailure bool, args ...string) (CmdResult, error) {
-	git, err := gitBinary()
-	if err != nil {
-		return CmdResult{}, err
-	}
-	return runCmd(ctx, git, args, CmdOptions{
-		Cwd:          local.Dir,
-		Env:          local.gitEnv(),
-		Timeout:      timeout,
-		AllowFailure: allowFailure,
-	})
+	return gitWithAuthRetry(ctx, local.Dir, local.gitEnv, local.refreshToken, timeout, allowFailure, args...)
 }
 
 func fetchBase(ctx context.Context, local *LocalRepo) error {
@@ -319,22 +366,15 @@ func changedFiles(ctx context.Context, dir string, local *LocalRepo) []string {
 }
 
 func pushBranch(ctx context.Context, dir string, local *LocalRepo, branch string) error {
-	return pushBranchTo(ctx, dir, local.HTTPSURL, local.gitEnv(), branch, branch)
+	return pushBranchTo(ctx, dir, local.HTTPSURL, local.gitEnv, local.refreshToken, branch, branch)
 }
 
 // pushBranchTo pushes a local branch to an explicit remote ref. The remote may
 // be another repository: a pull request head that lives in a fork the author
-// opened for maintainers, where local and remote branch names differ.
-func pushBranchTo(ctx context.Context, dir, remoteURL string, env []string, localBranch, remoteBranch string) error {
-	git, err := gitBinary()
-	if err != nil {
-		return err
-	}
-	_, err = runCmd(ctx, git, []string{"push", remoteURL, localBranch + ":" + remoteBranch}, CmdOptions{
-		Cwd:     dir,
-		Env:     env,
-		Timeout: 10 * time.Minute,
-	})
+// opened for maintainers, where local and remote branch names differ. env is a
+// factory so an auth retry rebuilds it from the token as of that moment.
+func pushBranchTo(ctx context.Context, dir, remoteURL string, env func() []string, rotate func(context.Context) bool, localBranch, remoteBranch string) error {
+	_, err := gitWithAuthRetry(ctx, dir, env, rotate, 10*time.Minute, false, "push", remoteURL, localBranch+":"+remoteBranch)
 	return err
 }
 

@@ -495,6 +495,12 @@ are unavailable the poller is the fallback; both funnel into `Router.Handle*`.
   live token (`GH.currentToken`) for every git operation and every child
   process; nothing is written to any gitconfig. An environment captured at
   startup would keep authenticating with the token from before its rotation.
+  A git command can be the first consumer to meet the expiry (a webhook job
+  right at expiry): `gitRun` and `pushBranchTo` recognise 401 / “could not
+  read Username … terminal prompts disabled”, rotate through
+  `GH.refreshAfterUnauthorized` and retry once with the rebuilt environment.
+  The `followMaster` watcher (§16) takes the same kind of factory, so its
+  `ls-remote` and clone also follow a rotation.
 - `plan` uses a temporary detached worktree under `tmp/`.
 
 ## 13. Coding agents (`runner.go`)
@@ -694,7 +700,10 @@ poll and a 500 ms debounce; invalid edits are ignored with a warning.
 `watchMaster` (`followMaster: true`) is the development counterpart of release
 updates: it polls `master` every 30 s, rebuilds in a dedicated clone under
 `$STATE/self` (frontend build included, `npm ci` only when the lockfile moves)
-and fires a restart; it takes precedence over `selfUpdate`. The watch baseline
+and fires a restart; it takes precedence over `selfUpdate`. It receives an
+environment factory (`AppContext.Env`) rather than one startup slice, so the
+`ls-remote` poll and the clone/build follow a rotated bot token like job git
+operations do. The watch baseline
 is the injected `main.commit`, not the remote head: a restart queued behind a
 long job re-execs whichever binary was built earlier, and seeding from the head
 would silently leave it one commit behind until the next push. The
@@ -746,6 +755,7 @@ keeps tests quiet. Notable coverage:
 | file | covers |
 | --- | --- |
 | `waitforchecks_test.go` | verdict, fail-fast, stuck, required checks, base flags, approval, log report |
+| `git_test.go` | push to a differently named remote ref, git environment follows token rotation, git-first 401 rotates and retries once, non-auth failures do not |
 | `conflict_test.go` | conflict detection, merge-API error classification, `conflictedFiles` on a real repo |
 | `cirepair_test.go` | worktree-ahead detection used to publish a stranded repair commit |
 | `review_test.go` | review command parsing, `review.json` loading, inline filtering, fallback body, review API payload |

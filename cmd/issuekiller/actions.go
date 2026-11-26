@@ -19,7 +19,6 @@ type AppContext struct {
 	RepoInfo RepoInfo
 	Local    *LocalRepo
 	Identity User
-	Token    string
 	Proxy    *Proxy
 	GH       *GH
 	Store    *Store
@@ -34,11 +33,11 @@ type AppContext struct {
 
 // Env rebuilds the child-process environment with the current token. The bot
 // token rotates (GH refreshes it on 401), so an environment captured at
-// startup would authenticate git and gh with an expired token. GH is the
-// live source in production; Token is the startup snapshot, kept only as a
-// fallback for contexts without a client (tests).
+// startup would authenticate git and gh with an expired token. GH is the only
+// source in production; a context without a client (tests) gets no token
+// rather than a snapshot that could go stale.
 func (a *AppContext) Env() []string {
-	token := a.Token
+	token := ""
 	if a.GH != nil {
 		token = a.GH.currentToken()
 	}
@@ -49,6 +48,24 @@ func (a *AppContext) Env() []string {
 	overrides["GH_TOKEN"] = token
 	overrides["GITHUB_TOKEN"] = token
 	return mergeEnv(buildGitEnv(a.Proxy, token, a.Identity), overrides)
+}
+
+// refreshToken rotates the bot token after git met an expired one and reports
+// whether a retry has a new value. A git command can be the first consumer to
+// see the expiry, before the API's 401 path has rotated anything.
+func (a *AppContext) refreshToken(ctx context.Context) bool {
+	if a.GH == nil {
+		return false
+	}
+	failed := a.GH.currentToken()
+	token, err := a.GH.refreshAfterUnauthorized(ctx, failed)
+	if err != nil {
+		if a.Log != nil {
+			a.Log.Warn("git token refresh failed: %v", err)
+		}
+		return false
+	}
+	return token != "" && token != failed
 }
 
 // projectURL is shown on plan comments so readers can find the project.
@@ -1124,7 +1141,7 @@ func doModifyPR(ctx context.Context, app *AppContext, trigger Trigger, pr PullRe
 		postReviewFailure(ctx, app, number, fmt.Errorf("commit: %w", err))
 		return
 	}
-	if err := pushBranchTo(ctx, worktree, prPushURL(app, pr), app.Env(), branch, pr.Head.Ref); err != nil {
+	if err := pushBranchTo(ctx, worktree, prPushURL(app, pr), app.Env, app.refreshToken, branch, pr.Head.Ref); err != nil {
 		postReviewFailure(ctx, app, number, fmt.Errorf("push to %s: %w", pr.Head.Repo.FullName, err))
 		return
 	}
@@ -2237,7 +2254,7 @@ func resolveConflictsIn(ctx context.Context, app *AppContext, target conflictTar
 	if err := commitAll(ctx, worktree, app.Env(), fmt.Sprintf("chore: resolve conflicts with %s for #%d", app.Local.Base, number)); err != nil {
 		return fmt.Errorf("commit conflict resolution: %w", err)
 	}
-	if err := pushBranchTo(ctx, worktree, target.RemoteURL, app.Env(), target.LocalBranch, target.RemoteBranch); err != nil {
+	if err := pushBranchTo(ctx, worktree, target.RemoteURL, app.Env, app.refreshToken, target.LocalBranch, target.RemoteBranch); err != nil {
 		return fmt.Errorf("push conflict resolution: %w", err)
 	}
 	return nil
