@@ -294,13 +294,15 @@ Other rules:
   comment on a tracked issue gets one, and so does any @-mention from anyone
   else. A text reply or an action still needs an approver @-mention
   (`handleUnroutedComment`): a question on a blocked issue is answered with
-  the stored failure reason, other instructions on a blocked issue are filed
-  as `ExtraNotes` for the retry, comments while work runs or merges get a
-  short acknowledgment, and comments on a done or cancelled issue explain
-  how to continue. A comment that is only a quote has nothing new to answer
-  and stays silent. Reply bodies come from the `router.reply.*` scaffold
-  keys, never from the comment text, so a stranger's words can never steer
-  what the bot writes.
+  the last lines of the stored failure reason (bounded and fence-safe), other
+  instructions on a blocked issue are appended to `ExtraNotes` for the retry,
+  comments while work runs or merges get a short acknowledgment, and comments
+  on a done or cancelled issue explain how to continue. Only an explicit
+  `?`/`？` or a question particle counts as a question; anything else is saved
+  as notes, so an instruction phrased as a request is not silently dropped.
+  A comment that is only a quote has nothing new to answer and stays silent.
+  Reply bodies come from the `router.reply.*` scaffold keys, never from the
+  comment text, so a stranger's words can never steer what the bot writes.
 
 ## 7. Job scheduler (`router.go`)
 

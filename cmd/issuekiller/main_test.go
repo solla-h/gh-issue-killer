@@ -153,16 +153,21 @@ func TestStripQuotedLines(t *testing.T) {
 
 func TestLooksLikeQuestion(t *testing.T) {
 	cases := map[string]bool{
-		"为什么失败了？":       true,
-		"为什么失败了":        true,
-		"怎么做":           true,
-		"好了吗":           true,
-		"is this done?": true,
-		"can you retry": true,
-		"顺便把超时也修了":      false,
-		"继续":            false,
-		"ok":            false,
-		"收到":            false,
+		"为什么失败了？":                      true,
+		"为什么失败了":                       true,
+		"怎么做":                          true,
+		"好了吗":                          true,
+		"is this done?":                true,
+		"why did it fail?":             true,
+		"can you retry":                false,
+		"Do the same for the CLI flag": false,
+		"Can you also add a test":      false,
+		"why did it fail":              false,
+		"thanks, looks good":           false,
+		"顺便把超时也修了":                     false,
+		"继续":                           false,
+		"ok":                           false,
+		"收到":                           false,
 	}
 	for input, expected := range cases {
 		if got := looksLikeQuestion(input); got != expected {

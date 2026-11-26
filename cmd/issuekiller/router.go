@@ -113,15 +113,16 @@ func stripMention(text, login string) string {
 // looksLikeQuestion is the heuristic the fall-through reply uses to tell a
 // question ("why did it fail?") from an instruction ("also fix the
 // timeout"). It only decides which canned reply fits; it never starts work.
+// English modal openers ("can ...", "do ...") are deliberately not treated as
+// questions: they usually introduce an instruction, and misclassifying one
+// drops it instead of saving it for the retry.
 func looksLikeQuestion(text string) bool {
 	trimmed := strings.TrimSpace(text)
 	if strings.Contains(trimmed, "?") || strings.Contains(trimmed, "？") {
 		return true
 	}
 	lower := strings.ToLower(trimmed)
-	for _, prefix := range []string{"为什么", "怎么", "怎样", "如何", "什么", "为啥",
-		"why", "how", "what", "when", "where", "who", "which",
-		"can ", "could ", "should ", "is ", "are ", "do ", "does ", "did "} {
+	for _, prefix := range []string{"为什么", "怎么", "怎样", "如何", "什么", "为啥"} {
 		if strings.HasPrefix(lower, prefix) {
 			return true
 		}
@@ -1273,17 +1274,25 @@ func (r *Router) HandleTrigger(ctx context.Context, fullName string, trigger Tri
 					if issue.State != "open" {
 						return
 					}
+					// The approval above already moved the phase to implementing
+					// before queueing, so checking for the old phase here would
+					// always bail and leave the issue stuck without a job. Only
+					// skip when something else (cancel, restart) superseded it.
 					current := r.store.Issue(fullName, trigger.IssueNumber)
-					if current.Phase != "awaiting_approval" && current.Phase != "blocked" {
+					if current.Phase != "implementing" {
 						return
 					}
-					app.Store.UpdateIssue(fullName, trigger.IssueNumber, func(state *IssueState) {
-						state.ExtraNotes = notes
-					})
-					current = r.store.Issue(fullName, trigger.IssueNumber)
 					if notes != "" {
+						app.Store.UpdateIssue(fullName, trigger.IssueNumber, func(state *IssueState) {
+							if strings.TrimSpace(state.ExtraNotes) == "" {
+								state.ExtraNotes = notes
+							} else {
+								state.ExtraNotes = strings.TrimSpace(state.ExtraNotes) + "\n" + notes
+							}
+						})
 						app.Log.Info("owner approved %s#%d with instructions: %s", fullName, trigger.IssueNumber, notes)
 					}
+					current = r.store.Issue(fullName, trigger.IssueNumber)
 					doImplement(jobCtx, app, trigger, issue, current)
 				})
 				return
@@ -1409,7 +1418,11 @@ func (r *Router) handleUnroutedComment(ctx context.Context, app *AppContext, ful
 	case "blocked":
 		if looksLikeQuestion(words) {
 			if strings.TrimSpace(st.BlockedReason) != "" {
-				r.replyToComment(ctx, app, trigger, "router.reply.blocked_reason", st.BlockedReason, r.agentLogin)
+				// BlockedReason can be raw agent output or a multi-KB error;
+				// only the last lines are useful, and an inner fence must not
+				// break out of the ``` block the reply wraps it in.
+				reason := strings.ReplaceAll(tailString(st.BlockedReason, 10), "```", "` ` `")
+				r.replyToComment(ctx, app, trigger, "router.reply.blocked_reason", reason, r.agentLogin)
 			} else {
 				r.replyToComment(ctx, app, trigger, "router.reply.ack")
 			}

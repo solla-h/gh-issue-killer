@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // newCommentRouter builds a router whose fake API answers issue reads as
@@ -121,6 +123,82 @@ func TestBlockedInstructionSavedAsNotes(t *testing.T) {
 	}
 	if !strings.Contains(body, "记下了") {
 		t.Fatalf("reply = %q, want the notes-saved acknowledgment", body)
+	}
+}
+
+// "<approval word> <notes>" must actually start the implementation job. The
+// phase is already "implementing" by the time the job runs, so waiting for the
+// old blocked/awaiting_approval phase would bail and leave the issue stuck
+// with a working label and nothing running. A broken remote makes fetchBase
+// fail, which proves doImplement ran; the note stays in ExtraNotes, which the
+// implement prompt renders (see TestImplementPromptIncludesOwnerNotes).
+func TestApprovalNotesRetryRunsImplement(t *testing.T) {
+	store := &Store{file: filepath.Join(t.TempDir(), "state.json"), state: State{Version: 1, Repos: map[string]*RepoState{}}}
+	store.UpdateIssue("acme/app", 5, func(st *IssueState) {
+		st.Phase = "blocked"
+		st.BlockedReason = "fetch base: boom"
+		st.ExtraNotes = "之前记下的补充"
+	})
+	gh, _ := newFakeAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/issues/5"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"state": "open", "number": 5, "title": "add a flag", "body": "add --json",
+			})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/issues/5/comments"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": 99})
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	})
+	app := &AppContext{
+		Cfg:        &Config{PlanParallel: 1, ImplementParallel: 1},
+		Repo:       RepoConfig{FullName: "acme/app", Approvers: []string{"owner"}, Language: "zh"},
+		Local:      &LocalRepo{HTTPSURL: filepath.Join(t.TempDir(), "missing.git"), Base: "master", WorktreeRoot: t.TempDir()},
+		GH:         gh,
+		Store:      store,
+		Log:        NewSilentLogger(),
+		AgentLogin: "bot",
+	}
+	router := NewRouter(app.Cfg, map[string]*AppContext{"acme/app": app}, "bot", store, NewSilentLogger())
+	router.HandleTrigger(context.Background(), "acme/app", commentTrigger("@bot continue 顺便补个单测", "owner"))
+	router.waitInactive(context.Background(), "acme/app#5", 5*time.Second)
+
+	state := store.Issue("acme/app", 5)
+	if state.Phase != "blocked" || !strings.Contains(state.BlockedReason, "fetch base:") {
+		t.Fatalf("the retry job did not reach doImplement (phase=%q reason=%q)", state.Phase, state.BlockedReason)
+	}
+	if state.ExtraNotes != "之前记下的补充\n顺便补个单测" {
+		t.Fatalf("ExtraNotes = %q, want the earlier note kept and the new one appended", state.ExtraNotes)
+	}
+}
+
+// The failure reason in the question reply is bounded and an inner ``` fence
+// cannot break out of the code block.
+func TestBlockedQuestionBoundsReason(t *testing.T) {
+	lines := make([]string, 0, 13)
+	for i := 1; i <= 12; i++ {
+		lines = append(lines, fmt.Sprintf("line %d", i))
+	}
+	lines = append(lines, "```inner fence```")
+	reason := strings.Join(lines, "\n")
+	router, _, calls := newCommentRouter(t, "blocked", reason)
+	router.HandleTrigger(context.Background(), "acme/app", commentTrigger("@bot 为什么失败了？", "owner"))
+	body, ok := postedCommentBody(t, calls)
+	if !ok {
+		t.Fatal("no reply comment was posted")
+	}
+	if !strings.Contains(body, "line 12") {
+		t.Fatalf("reply = %q, want the newest failure lines", body)
+	}
+	if strings.Contains(body, "line 1\n") || strings.Contains(body, "line 2\n") || strings.Contains(body, "line 3\n") {
+		t.Fatalf("reply = %q, want the failure reason bounded to the last lines", body)
+	}
+	if strings.Contains(body, "```inner fence```") {
+		t.Fatalf("reply = %q, an inner fence must be neutralised", body)
+	}
+	if !strings.Contains(body, "` ` `inner fence` ` `") {
+		t.Fatalf("reply = %q, want the inner fence neutralised in place", body)
 	}
 }
 
