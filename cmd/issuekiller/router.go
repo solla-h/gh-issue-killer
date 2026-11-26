@@ -506,14 +506,17 @@ func (r *Router) enqueueReviewFix(ctx context.Context, app *AppContext, fullName
 		}
 		if strings.TrimSpace(instructions) == "" {
 			_, _ = app.GH.PostComment(jobCtx, fullName, number, app.text(number, "review.nothing"))
+			app.GH.SetAgentState(jobCtx, fullName, number, awaitingLabel)
 			return
 		}
+		// The thumbs-up approved the review, so a successful fix merges on its
+		// own: doModifyPR pushes, re-runs the checks and lands the PR.
 		doModifyPR(jobCtx, app, Trigger{
 			Type:        "reaction",
 			IssueNumber: number,
 			Sender:      login,
 			Key:         fmt.Sprintf("review-%d", time.Now().UnixNano()),
-		}, pr, instructions)
+		}, pr, instructions, true)
 	})
 }
 
@@ -1252,7 +1255,9 @@ func (r *Router) HandleTrigger(ctx context.Context, fullName string, trigger Tri
 						app.Log.Warn("modify PR %s#%d: %v", fullName, trigger.IssueNumber, prErr)
 						return
 					}
-					doModifyPR(jobCtx, app, trigger, pr, strings.TrimSpace(stripMention(trigger.CommentBody, r.agentLogin)))
+					// An instruction-only modify leaves the merge to the
+					// maintainer: only the review thumbs-up pre-approves it.
+					doModifyPR(jobCtx, app, trigger, pr, strings.TrimSpace(stripMention(trigger.CommentBody, r.agentLogin)), false)
 					return
 				}
 				if isRelevantIssue(issue, r.agentLogin) || mentioned {

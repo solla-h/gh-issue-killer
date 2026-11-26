@@ -169,11 +169,14 @@ go build -o bin/issuekiller ./cmd/issuekiller
 | `@agent cancel`、`@agent stop`、`@agent 停止` | 中止当前任务 |
 | plan 评论上的 👍 | 等同 `@agent lgtm` |
 | PR 公告评论上的 👍 | 等同 `@agent 合并` |
-| bot 那条「Review 已提交」评论上的 👍 | 按这条 review 的意见直接改 PR 并推送 |
+| bot 那条「Review 已提交」评论上的 👍 | 按这条 review 的意见改 PR、跑检查，通过后自动合并（该 PR 对应的 issue 会标记完成） |
 | bot 那条「出错了 / 被阻塞」评论上的 👍 | 重试被阻塞的任务（等同 `@agent continue`） |
 
 被 watch 的仓库收到新 PR 会**自动 review**（默认开启）：每个新 head 都会收到
-同样的 review（总结 + 行内意见），draft 和 bot 自己提的 PR 除外；只想手动 review
+同样的 review（总结 + 行内意见），draft 和 bot 自己提的 PR 除外；
+点了 👍 表示接受意见之后，bot 会改代码、跑检查，通过后直接合并，不需要再操作
+（合并前关掉 PR 可以取消）；PR 上会带 `agent:awaiting-approval`（等 👍）和
+`agent:working`（处理中）标签。只想手动 review
 的仓库把 `"autoReview": false` 写进该仓库的配置。某个 head 的 review 失败后不会由
 轮询自动重试，新的 push 或 `@agent review` 才会再跑一次。review 会作为独立任务
 显示在看板上（审查中 / 已审查 / 审查失败），带 PR 标题和链接，与 issue 任务并列；

@@ -776,6 +776,9 @@ func doReviewPR(ctx context.Context, app *AppContext, trigger Trigger, pr PullRe
 	// recorded at enqueue time so the same head is not retried forever, and a
 	// manual `@bot review` remains the way to force a re-run.
 	app.Store.SetReviewedSHA(app.Repo.FullName, number, pr.Head.SHA)
+	// The prompt carries the thumbs-up, so the PR itself says it is waiting for
+	// the approver; the fix job then switches the label to working.
+	app.GH.SetAgentState(ctx, app.Repo.FullName, number, awaitingLabel)
 	app.Store.SetReviewPhase(app.Repo.FullName, number, "reviewed")
 	succeeded = true
 }
@@ -1020,16 +1023,18 @@ func prPushURL(app *AppContext, pr PullRequest) string {
 	return fmt.Sprintf("https://github.com/%s.git", pr.Head.Repo.FullName)
 }
 
-// doModifyPR applies a maintainer's instructions to someone else's pull
-// request and pushes the result to the PR head branch. It never force-pushes
-// and never opens a second PR.
-func doModifyPR(ctx context.Context, app *AppContext, trigger Trigger, pr PullRequest, instructions string) {
+// doModifyPR applies instructions to a pull request and reports whether the
+// branch was pushed. autoMerge lands the PR after a successful push: the
+// thumbs-up that accepted the review already approved the direction, so the
+// maintainer is not asked for a second confirmation. It never force-pushes and
+// never opens a second PR.
+func doModifyPR(ctx context.Context, app *AppContext, trigger Trigger, pr PullRequest, instructions string, autoMerge bool) bool {
 	number := pr.Number
 	rememberPRMeta(app, pr)
 	if strings.TrimSpace(instructions) == "" {
 		_, _ = app.GH.PostComment(ctx, app.Repo.FullName, number,
 			fmt.Sprintf(app.text(number, "modify.empty"), app.AgentLogin))
-		return
+		return false
 	}
 	if !canPushToPR(app, pr) {
 		_, _ = app.GH.PostComment(ctx, app.Repo.FullName, number, strings.Join([]string{
@@ -1039,8 +1044,18 @@ func doModifyPR(ctx context.Context, app *AppContext, trigger Trigger, pr PullRe
 			"",
 			app.text(number, "modify.cannot.hint"),
 		}, "\n"))
-		return
+		app.GH.SetAgentState(ctx, app.Repo.FullName, number, awaitingLabel)
+		return false
 	}
+	app.GH.SetAgentState(ctx, app.Repo.FullName, number, workingLabel)
+	pushed := false
+	// Every failure below parks the PR back on the approver: the label is the
+	// board's only hint that nothing is running.
+	defer func() {
+		if !pushed {
+			app.GH.SetAgentState(ctx, app.Repo.FullName, number, awaitingLabel)
+		}
+	}()
 	app.Log.Info("pr modify start for %s#%d", app.Repo.FullName, number)
 	react(ctx, app, trigger, "eyes")
 	runDir := runDirForPR(app, number)
@@ -1048,18 +1063,18 @@ func doModifyPR(ctx context.Context, app *AppContext, trigger Trigger, pr PullRe
 
 	if err := fetchBase(ctx, app.Local); err != nil {
 		postReviewFailure(ctx, app, number, fmt.Errorf("fetch %s: %w", app.Local.Base, err))
-		return
+		return false
 	}
 	ref, err := fetchPullRequestHead(ctx, app.Local, number)
 	if err != nil {
 		postReviewFailure(ctx, app, number, fmt.Errorf("fetch PR head: %w", err))
-		return
+		return false
 	}
 	branch := fmt.Sprintf("pr-%d-%s", number, shortID(fmt.Sprintf("%d", time.Now().UnixNano())))
 	worktree, err := createWorktreeFromRef(ctx, app.Local, branch, ref)
 	if err != nil {
 		postReviewFailure(ctx, app, number, fmt.Errorf("worktree: %w", err))
-		return
+		return false
 	}
 	defer func() {
 		removeWorktree(ctx, app.Local, worktree, true)
@@ -1069,7 +1084,7 @@ func doModifyPR(ctx context.Context, app *AppContext, trigger Trigger, pr PullRe
 	runner, err := newCodingRunner(app.Repo.CodingAgent)
 	if err != nil {
 		postReviewFailure(ctx, app, number, err)
-		return
+		return false
 	}
 	prompt, err := renderPrompt("modify_pr", map[string]string{
 		"REPO":         app.Repo.FullName,
@@ -1088,7 +1103,7 @@ func doModifyPR(ctx context.Context, app *AppContext, trigger Trigger, pr PullRe
 	})
 	if err != nil {
 		postReviewFailure(ctx, app, number, err)
-		return
+		return false
 	}
 	if _, err := runner.Run(ctx, RunnerOptions{
 		Cwd:     worktree,
@@ -1101,11 +1116,11 @@ func doModifyPR(ctx context.Context, app *AppContext, trigger Trigger, pr PullRe
 		Log:     app.Log,
 	}); err != nil {
 		postReviewFailure(ctx, app, number, fmt.Errorf("modify agent: %w", err))
-		return
+		return false
 	}
 	if gitStatus(ctx, worktree, app.Env) == "" {
 		_, _ = app.GH.PostComment(ctx, app.Repo.FullName, number, app.text(number, "modify.nochange"))
-		return
+		return false
 	}
 	checkResults, ok := runChecksWithFixes(ctx, app, runner, "", worktree, runDir)
 	if !ok {
@@ -1116,17 +1131,26 @@ func doModifyPR(ctx context.Context, app *AppContext, trigger Trigger, pr PullRe
 			"",
 			fmt.Sprintf(app.text(number, "modify.checks_failed_hint"), app.AgentLogin),
 		}, "\n"))
-		return
+		return false
 	}
 	if err := commitAll(ctx, worktree, app.Env, fmt.Sprintf("chore: apply maintainer instructions for #%d", number)); err != nil {
 		postReviewFailure(ctx, app, number, fmt.Errorf("commit: %w", err))
-		return
+		return false
 	}
 	if err := pushBranchTo(ctx, worktree, prPushURL(app, pr), app.Env, branch, pr.Head.Ref); err != nil {
 		postReviewFailure(ctx, app, number, fmt.Errorf("push to %s: %w", pr.Head.Repo.FullName, err))
-		return
+		return false
 	}
+	pushed = true
+	finishPRModify(ctx, app, trigger, pr, runDir, checkResults, autoMerge)
+	return true
+}
 
+// finishPRModify reports a pushed fix and lands the PR when the review already
+// approved it. Extracted from doModifyPR so the comment/label/merge wiring can
+// be tested without git or a coding agent.
+func finishPRModify(ctx context.Context, app *AppContext, trigger Trigger, pr PullRequest, runDir string, checkResults []CheckResult, autoMerge bool) {
+	number := pr.Number
 	manifest := loadManifest(runDir)
 	body := []string{
 		fmt.Sprintf(app.text(number, "modify.done.title"), pr.Head.Repo.FullName),
@@ -1138,9 +1162,35 @@ func doModifyPR(ctx context.Context, app *AppContext, trigger Trigger, pr PullRe
 	if shotsMD := screenshotsMarkdown(collectScreenshots(ctx, app, number, runDir, manifest)); shotsMD != "" {
 		body = append(body, "", app.text(number, "common.screenshots"), "", shotsMD)
 	}
-	body = append(body, "", fmt.Sprintf(app.text(number, "modify.done.hint"), app.AgentLogin))
+	if autoMerge {
+		body = append(body, "", app.text(number, "modify.done.merge_hint"))
+	} else {
+		body = append(body, "", fmt.Sprintf(app.text(number, "modify.done.hint"), app.AgentLogin))
+	}
 	_, _ = app.GH.PostComment(ctx, app.Repo.FullName, number, strings.Join(body, "\n"))
 	app.Log.Info("pr modified for %s#%d (%s)", app.Repo.FullName, number, pr.Head.Repo.FullName)
+	if autoMerge {
+		mergeReviewedPR(ctx, app, trigger, number)
+		return
+	}
+	app.GH.SetAgentState(ctx, app.Repo.FullName, number, awaitingLabel)
+}
+
+// mergeReviewedPR lands the PR a review fix just updated. The thumbs-up that
+// accepted the review is the approval, so a green head merges without a second
+// confirmation; a failing gate parks the PR on the approver instead.
+func mergeReviewedPR(ctx context.Context, app *AppContext, trigger Trigger, number int) {
+	pr, err := app.GH.GetPR(ctx, app.Repo.FullName, number)
+	if err != nil {
+		app.Log.Warn("merge reviewed PR %s#%d: %v", app.Repo.FullName, number, err)
+		app.GH.SetAgentState(ctx, app.Repo.FullName, number, awaitingLabel)
+		return
+	}
+	if pr.State != "open" {
+		app.GH.SetAgentState(ctx, app.Repo.FullName, number, "")
+		return
+	}
+	doMergePR(ctx, app, trigger, pr)
 }
 
 // doMergePR lands a pull request the daemon does not own: resolve conflicts,
@@ -1150,6 +1200,17 @@ func doMergePR(ctx context.Context, app *AppContext, trigger Trigger, pr PullReq
 	number := pr.Number
 	rememberPRMeta(app, pr)
 	app.Log.Info("pr merge start for %s#%d", app.Repo.FullName, number)
+	// The merge job owns the PR label from here: green lands the PR, anything
+	// else parks it back on the approver.
+	app.GH.SetAgentState(ctx, app.Repo.FullName, number, workingLabel)
+	landed := false
+	defer func() {
+		if landed {
+			app.GH.SetAgentState(ctx, app.Repo.FullName, number, "")
+			return
+		}
+		app.GH.SetAgentState(ctx, app.Repo.FullName, number, awaitingLabel)
+	}()
 	react(ctx, app, trigger, "hooray")
 	if !canPushToPR(app, pr) {
 		_, _ = app.GH.PostComment(ctx, app.Repo.FullName, number, strings.Join([]string{
@@ -1241,6 +1302,8 @@ func doMergePR(ctx context.Context, app *AppContext, trigger Trigger, pr PullReq
 				fmt.Sprintf(app.text(number, "merge.done.pr"), number, pr.Base.Ref),
 			}, "\n"))
 			app.Log.Info("merged PR %s#%d", app.Repo.FullName, number)
+			landed = true
+			finishMergedPR(ctx, app, number)
 			return
 		}
 		if isConflictError(mergeErr) && rounds < app.Cfg.MaxFixRounds {
@@ -1259,6 +1322,29 @@ func doMergePR(ctx context.Context, app *AppContext, trigger Trigger, pr PullReq
 		postStatusComment(ctx, app, number,
 			fmt.Sprintf("%s\n\n```\n%s\n```\n\n%s", app.text(number, "merge.failed.title"), sanitize(detail), app.text(number, "merge.failed.hint")))
 		return
+	}
+}
+
+// finishMergedPR closes the book on a PR merged outside the issue flow: the
+// review labels go away, and a tracked issue that opened this PR is marked done
+// so the board does not keep it in a stale blocked/pr_open phase.
+func finishMergedPR(ctx context.Context, app *AppContext, number int) {
+	app.GH.SetAgentState(ctx, app.Repo.FullName, number, "")
+	for _, issueNumber := range app.Store.IssueNumbers(app.Repo.FullName) {
+		if issueNumber == number {
+			continue
+		}
+		st := app.Store.Issue(app.Repo.FullName, issueNumber)
+		if st.PRNumber != number || st.Phase == "done" || st.Phase == "cancelled" {
+			continue
+		}
+		app.Store.UpdateIssue(app.Repo.FullName, issueNumber, func(state *IssueState) {
+			state.Phase = "done"
+			state.BlockedReason = ""
+			state.BlockedByCI = false
+		})
+		app.GH.SetAgentState(ctx, app.Repo.FullName, issueNumber, "")
+		app.Log.Info("merged PR %s#%d closes tracked issue #%d", app.Repo.FullName, number, issueNumber)
 	}
 }
 

@@ -206,12 +206,16 @@ Open an issue that mentions the bot (or assign it to the bot). Then:
 | `@agent cancel`, `@agent stop`, `@agent 停止` | abort the current task |
 | 👍 on the plan comment | same as `@agent lgtm` |
 | 👍 on the PR-announcement comment | same as `@agent 合并` |
-| 👍 on the bot's “Review 已提交” comment | apply that review's findings to the PR (edit + push) |
+| 👍 on the bot's “Review 已提交” comment | apply the findings, run the checks and merge the PR once they pass (a tracked issue that opened that PR is marked done) |
 | 👍 on the bot's “Something went wrong” / blocked comment | retry the blocked task (same as `@agent continue`) |
 
 A new pull request in a watched repo is reviewed **automatically** (on by
 default): every new head gets the same review with inline findings, while
-drafts and the bot's own PRs are left alone. A repo that only wants the manual
+drafts and the bot's own PRs are left alone.
+When the review findings are accepted with 👍, the bot fixes the PR, reruns the
+checks and merges it in one go; the PR carries `agent:awaiting-approval` while
+it waits for that 👍 and `agent:working` while it runs, so the labels show the
+state on the PR itself. A repo that only wants the manual
 command sets `"autoReview": false`; a failed review is retried by a new push or
 `@agent review`, not by the poller. Reviews appear on the dashboard as their own
 tasks (reviewing / reviewed / failed) with the PR title and link, next to the

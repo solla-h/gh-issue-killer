@@ -296,11 +296,15 @@ Other rules:
   and without the ack the approver cannot tell the reaction was seen.
 - 👎 is ignored; 👍 on the review prompt comment (`ReviewCommentID`) means
   “apply this review”: the daemon rebuilds the instructions from the review body
-  and its inline comments (`reviewInstructions`) and runs `doModifyPR` on the
-  PR. This exists because GitHub has no reactions API for review bodies, so the
-  daemon posts a small follow-up comment that carries the thumbs-up. The prompt
-  id is cleared when consumed, so the poller does not restart the fix on every
-  scan.
+  and its inline comments (`reviewInstructions`) and runs `doModifyPR` with
+  `autoMerge` on the PR. This exists because GitHub has no reactions API for
+  review bodies, so the daemon posts a small follow-up comment that carries the
+  thumbs-up. The prompt id is cleared when consumed, so the poller does not
+  restart the fix on every scan. The thumbs-up is the merge approval: once the
+  fix is pushed and the gate passes, `mergeReviewedPR` lands the PR without a
+  second confirmation (`doMergePR`), and `finishMergedPR` clears the labels and
+  marks a tracked issue that opened the PR as `done`. Closing the PR before the
+  merge lands stops it.
 - Reaction events are not always delivered, so `checkReactions` (30 s poller)
   re-checks 👍 on the plan comment, the PR announcement, the review prompt and
   a blocked task's status comment; reviewed PRs are not in a task phase, so the
@@ -403,7 +407,12 @@ agent with `modify_pr.md`, runs `checks.json` (with repair rounds), commits and
 pushes to `pr.Head.Ref` on `pr.Head.Repo` (`pushBranchTo`). `canPushToPR`
 allows same-repository branches and forks with `maintainer_can_modify`; without
 it the daemon comments that it cannot push. The worktree and local branch are
-removed afterwards.
+removed afterwards. It returns whether the branch was pushed, and with
+`autoMerge` (the review 👍 path) `finishPRModify` posts the update comment and
+runs `mergeReviewedPR`, which merges once the pushed head passes the gate. The
+PR carries `agent:working` while the job runs and `agent:awaiting-approval`
+when it waits for the approver; `doReviewPR` parks a freshly reviewed PR on
+`agent:awaiting-approval` so the board shows the pending decision on PRs too.
 
 **CI settle** (`settleCIGate`, runs on the CI queue) — if the repo has no
 workflows it returns immediately; otherwise it waits briefly for the new check
