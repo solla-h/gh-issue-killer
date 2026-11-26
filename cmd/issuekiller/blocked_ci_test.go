@@ -116,7 +116,7 @@ func TestRetryBlockedCILogsOnlyWhenQueued(t *testing.T) {
 		st.BlockedByCI = true
 		st.PRNumber = 50
 	})
-	gh, _ := newFakeAPI(t, func(w http.ResponseWriter, r *http.Request) {
+	gh, calls := newFakeAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/repos/acme/app/pulls/50":
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -146,7 +146,14 @@ func TestRetryBlockedCILogsOnlyWhenQueued(t *testing.T) {
 		active: map[string]bool{}, queued: map[string]bool{}, cancels: map[string]context.CancelFunc{},
 	}
 	router.retryBlockedCI(context.Background(), app)
+	firstCalls := calls.snapshot()
 	router.retryBlockedCI(context.Background(), app)
+	secondCalls := calls.snapshot()
+	for _, call := range secondCalls[len(firstCalls):] {
+		if call.path == "/repos/acme/app/pulls/50" || strings.HasSuffix(call.path, "/check-runs") {
+			t.Fatalf("second scan made unnecessary API request: %+v", call)
+		}
+	}
 	if got := len(pool.work); got != 1 {
 		t.Fatalf("scan queued %d jobs, want 1", got)
 	}
@@ -155,44 +162,49 @@ func TestRetryBlockedCILogsOnlyWhenQueued(t *testing.T) {
 	}
 }
 
-// A merge interrupted after the phase moved to merging is resumed only while
-// no live or queued job owns the issue.
+// A merge interrupted after the phase moved to merging is resumed regardless
+// of BlockedByCI, but only while no live or queued job owns the issue.
 func TestRetryBlockedCIResumesInterruptedMerge(t *testing.T) {
-	for _, owned := range []string{"", "active", "queued"} {
-		name := "no job"
-		if owned != "" {
-			name = owned + " job"
-		}
-		t.Run(name, func(t *testing.T) {
-			store := &Store{file: filepath.Join(t.TempDir(), "state.json"), state: State{Version: 1, Repos: map[string]*RepoState{}}}
-			store.UpdateIssue("acme/app", 5, func(st *IssueState) {
-				st.Phase = "merging"
-				st.BlockedByCI = true
-				st.PRNumber = 50
+	for _, blockedByCI := range []bool{true, false} {
+		for _, owned := range []string{"", "active", "queued"} {
+			name := "no job"
+			if owned != "" {
+				name = owned + " job"
+			}
+			if !blockedByCI {
+				name = "plain merge, " + name
+			}
+			t.Run(name, func(t *testing.T) {
+				store := &Store{file: filepath.Join(t.TempDir(), "state.json"), state: State{Version: 1, Repos: map[string]*RepoState{}}}
+				store.UpdateIssue("acme/app", 5, func(st *IssueState) {
+					st.Phase = "merging"
+					st.BlockedByCI = blockedByCI
+					st.PRNumber = 50
+				})
+				pool := &repoPool{plan: make(chan routerJob, 1), work: make(chan routerJob, 1), ci: make(chan routerJob, 1)}
+				router := &Router{
+					store: store, log: NewSilentLogger(),
+					pools:  map[string]*repoPool{"acme/app": pool},
+					active: map[string]bool{}, queued: map[string]bool{}, cancels: map[string]context.CancelFunc{},
+				}
+				key := "acme/app#5"
+				if owned == "active" {
+					router.active[key] = true
+				}
+				if owned == "queued" {
+					router.queued[key] = true
+				}
+				app := &AppContext{Repo: RepoConfig{FullName: "acme/app"}, Store: store, Log: NewSilentLogger()}
+				router.retryBlockedCI(context.Background(), app)
+				want := 0
+				if owned == "" {
+					want = 1
+				}
+				if got := len(pool.work); got != want {
+					t.Fatalf("scan queued %d jobs, want %d", got, want)
+				}
 			})
-			pool := &repoPool{plan: make(chan routerJob, 1), work: make(chan routerJob, 1), ci: make(chan routerJob, 1)}
-			router := &Router{
-				store: store, log: NewSilentLogger(),
-				pools:  map[string]*repoPool{"acme/app": pool},
-				active: map[string]bool{}, queued: map[string]bool{}, cancels: map[string]context.CancelFunc{},
-			}
-			key := "acme/app#5"
-			if owned == "active" {
-				router.active[key] = true
-			}
-			if owned == "queued" {
-				router.queued[key] = true
-			}
-			app := &AppContext{Repo: RepoConfig{FullName: "acme/app"}, Store: store, Log: NewSilentLogger()}
-			router.retryBlockedCI(context.Background(), app)
-			want := 0
-			if owned == "" {
-				want = 1
-			}
-			if got := len(pool.work); got != want {
-				t.Fatalf("scan queued %d jobs, want %d", got, want)
-			}
-		})
+		}
 	}
 }
 

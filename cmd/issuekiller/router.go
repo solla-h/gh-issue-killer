@@ -534,11 +534,11 @@ func (r *Router) enqueueReviewFix(ctx context.Context, app *AppContext, fullName
 // the phase moved to merging. Other blocked reasons (local checks, an
 // unreproducible bug, exhausted conflict rounds) stay parked for the user.
 func (r *Router) retryBlockedCI(ctx context.Context, app *AppContext) {
-	// Same reason as checkReactions: only a tracked, CI-blocked issue can be
-	// resumed, so the scan starts from the state instead of listing the repo.
+	// Only tracked issues with a PR can be resumed, so the scan starts from
+	// state instead of listing the repo.
 	for _, number := range app.Store.IssueNumbers(app.Repo.FullName) {
 		st := r.store.Issue(app.Repo.FullName, number)
-		if !st.BlockedByCI || st.PRNumber == 0 {
+		if st.PRNumber == 0 {
 			continue
 		}
 		key := fmt.Sprintf("%s#%d", app.Repo.FullName, number)
@@ -556,7 +556,7 @@ func (r *Router) retryBlockedCI(ctx context.Context, app *AppContext) {
 			}
 			continue
 		}
-		if st.Phase != "blocked" {
+		if !st.BlockedByCI || st.Phase != "blocked" {
 			continue
 		}
 		pr, err := app.GH.GetPR(ctx, app.Repo.FullName, st.PRNumber)
