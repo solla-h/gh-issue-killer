@@ -446,9 +446,14 @@ through an early guard (closed issue, changed phase, missing PR) and when the
 merge re-blocks on CI after running, so those outcomes remain retryable. If the
 daemon dies after the merge job set the phase to `merging`, the same poll
 resumes it once no job owns the issue (both in-memory maps are empty after a
-restart) and re-enters the merge path, which is safe for a PR that already
-merged. Other blocked reasons (local checks, an unreproducible bug, exhausted
-conflict rounds) never resume on their own.
+restart) and re-enters the merge path. When the PR already merged, that path
+finishes the issue exactly like a successful merge: it closes the GitHub issue,
+records `MergedAt`, posts the merge-done comment and removes the worktree, so
+the next poll does not mistake the still-open `done` issue for a reopen.
+`doMerge` owns the terminal phase and flag: every non-CI outcome clears
+`BlockedByCI`, while a CI re-block keeps it set for the next retry. Other
+blocked reasons (local checks, an unreproducible bug, exhausted conflict rounds)
+never resume on their own.
 
 ## 10. Checks, manifest and screenshots
 

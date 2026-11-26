@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -195,21 +196,30 @@ func TestRetryBlockedCIResumesInterruptedMerge(t *testing.T) {
 	}
 }
 
-// Re-entering doMerge for an interrupted merge is safe when the PR already
-// merged: it finishes the issue instead of trying to merge again.
+// Re-entering doMerge for an interrupted merge finishes the issue when the PR
+// already merged: close it, record the merge and remove the worktree.
 func TestRetryBlockedCICompletesAlreadyMergedPR(t *testing.T) {
+	oldState := stateDirOverride
+	stateDirOverride = t.TempDir()
+	t.Cleanup(func() { stateDirOverride = oldState })
+	worktree := filepath.Join(treesDir(), "issue-5")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatalf("create worktree: %v", err)
+	}
 	store := &Store{file: filepath.Join(t.TempDir(), "state.json"), state: State{Version: 1, Repos: map[string]*RepoState{}}}
 	store.UpdateIssue("acme/app", 5, func(st *IssueState) {
 		st.Phase = "merging"
 		st.BlockedByCI = true
 		st.PRNumber = 50
+		st.Branch = "agent/issue-5-test"
+		st.Worktree = worktree
 	})
-	gh, _ := newFakeAPI(t, func(w http.ResponseWriter, r *http.Request) {
+	gh, calls := newFakeAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/app/issues/5":
 			_ = json.NewEncoder(w).Encode(map[string]any{"number": 5, "state": "open"})
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/app/pulls/50":
-			_ = json.NewEncoder(w).Encode(map[string]any{"number": 50, "state": "closed"})
+			_ = json.NewEncoder(w).Encode(map[string]any{"number": 50, "state": "closed", "merged": true})
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/labels"):
 			_ = json.NewEncoder(w).Encode([]any{})
 		default:
@@ -219,6 +229,7 @@ func TestRetryBlockedCICompletesAlreadyMergedPR(t *testing.T) {
 	app := &AppContext{
 		Cfg:   &Config{MaxFixRounds: 1},
 		Repo:  RepoConfig{FullName: "acme/app"},
+		Local: &LocalRepo{Dir: t.TempDir()},
 		GH:    gh,
 		Store: store,
 		Log:   NewSilentLogger(),
@@ -241,6 +252,28 @@ func TestRetryBlockedCICompletesAlreadyMergedPR(t *testing.T) {
 	}
 	if got.BlockedByCI {
 		t.Fatal("finishing an already-merged PR kept BlockedByCI set")
+	}
+	if got.MergedAt == "" {
+		t.Fatal("finishing an already-merged PR did not record MergedAt")
+	}
+	if _, err := os.Stat(worktree); !os.IsNotExist(err) {
+		t.Fatalf("worktree %s still exists after the recovered merge", worktree)
+	}
+	closed, commented := false, false
+	for _, call := range calls.snapshot() {
+		if call.method == http.MethodPatch && call.path == "/repos/acme/app/issues/5" &&
+			strings.Contains(call.body, `"state":"closed"`) {
+			closed = true
+		}
+		if call.method == http.MethodPost && call.path == "/repos/acme/app/issues/5/comments" {
+			commented = true
+		}
+	}
+	if !closed {
+		t.Fatal("finishing an already-merged PR did not close the issue")
+	}
+	if !commented {
+		t.Fatal("finishing an already-merged PR did not post the merge-done comment")
 	}
 }
 

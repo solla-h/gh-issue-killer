@@ -2238,7 +2238,14 @@ func doMerge(ctx context.Context, app *AppContext, trigger Trigger, issue Issue,
 		return
 	}
 	if pr.State != "open" {
-		app.Store.UpdateIssue(app.Repo.FullName, number, func(state *IssueState) { state.Phase = "done" })
+		if pr.Merged {
+			finishMergedIssue(ctx, app, number, st)
+			return
+		}
+		app.Store.UpdateIssue(app.Repo.FullName, number, func(state *IssueState) {
+			state.Phase = "done"
+			state.BlockedByCI = false
+		})
 		app.GH.SetAgentState(ctx, app.Repo.FullName, number, "")
 		return
 	}
@@ -2271,6 +2278,10 @@ func doMerge(ctx context.Context, app *AppContext, trigger Trigger, issue Issue,
 			}
 			pr = updated
 			if pr.State != "open" {
+				if pr.Merged {
+					finishMergedIssue(ctx, app, number, st)
+					return
+				}
 				app.Store.UpdateIssue(app.Repo.FullName, number, func(state *IssueState) {
 					state.Phase = "done"
 					state.BlockedByCI = false
@@ -2340,6 +2351,14 @@ func doMerge(ctx context.Context, app *AppContext, trigger Trigger, issue Issue,
 		return
 	}
 
+	finishMergedIssue(ctx, app, number, st)
+}
+
+// finishMergedIssue completes an issue whose PR merged: it closes the issue,
+// records the merge, posts the done comment and removes the worktree. It is
+// shared with the resume path because a daemon death between MergePR and
+// cleanup leaves the issue open with phase merging.
+func finishMergedIssue(ctx context.Context, app *AppContext, number int, st IssueState) {
 	_ = app.GH.DeleteBranch(ctx, app.Repo.FullName, st.Branch)
 	current, err := app.GH.GetIssue(ctx, app.Repo.FullName, number)
 	if err == nil && current.State == "open" {

@@ -602,13 +602,6 @@ func (r *Router) retryBlockedCIMergeJob(app *AppContext, number int) func(contex
 			Sender:      r.agentLogin,
 			Key:         fmt.Sprintf("retry-%d", time.Now().UnixNano()),
 		}, issue, current)
-		// A CI re-block remains eligible for this poller. Every other returned
-		// outcome has consumed the retry and must not retain the old flag.
-		app.Store.UpdateIssue(app.Repo.FullName, number, func(state *IssueState) {
-			if state.Phase != "blocked" || !state.BlockedByCI {
-				state.BlockedByCI = false
-			}
-		})
 	}
 }
 
