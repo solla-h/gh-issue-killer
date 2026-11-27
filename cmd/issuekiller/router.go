@@ -111,17 +111,30 @@ func stripMention(text, login string) string {
 }
 
 // looksLikeQuestion distinguishes explicit questions from instructions. A
-// trailing question mark counts unless the text is a polite imperative;
-// question particles and openers remain supported. URL query strings are not
+// trailing question mark counts unless the text is a polite imperative such as
+// "Can you add a test?"; an embedded why/what/how still makes it a question, so
+// "Could you tell me why it failed?" asks for the failure reason.
+// Question particles and openers remain supported. URL query strings are not
 // terminal punctuation and therefore do not count.
 func looksLikeQuestion(text string) bool {
 	trimmed := strings.TrimSpace(text)
 	if strings.HasSuffix(trimmed, "?") || strings.HasSuffix(trimmed, "？") {
 		lower := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(trimmed, "?"), "？")))
+		if containsWord(lower, "why", "what", "how", "when", "where", "which", "who") {
+			return true
+		}
 		for _, prefix := range []string{"can you ", "could you ", "would you ", "will you ", "please "} {
-			if strings.HasPrefix(lower, prefix) {
-				return false
+			if !strings.HasPrefix(lower, prefix) {
+				continue
 			}
+			rest := strings.TrimSpace(strings.TrimPrefix(lower, prefix))
+			rest = strings.TrimSpace(strings.TrimPrefix(rest, "please "))
+			for _, verb := range []string{"add", "fix", "also", "test", "check", "update", "change", "remove", "make", "run", "use", "keep", "handle", "refactor", "rename", "move", "improve", "adjust", "ensure", "retry", "continue", "merge", "apply", "review"} {
+				if rest == verb || strings.HasPrefix(rest, verb+" ") {
+					return false
+				}
+			}
+			return true
 		}
 		return true
 	}
@@ -134,6 +147,22 @@ func looksLikeQuestion(text string) bool {
 	for _, suffix := range []string{"吗", "呢", "么"} {
 		if strings.HasSuffix(trimmed, suffix) {
 			return true
+		}
+	}
+	return false
+}
+
+// containsWord reports whether one of words appears as a standalone word, so
+// "why" matches "why did it fail" but not "somewhy".
+func containsWord(text string, words ...string) bool {
+	fields := strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	for _, field := range fields {
+		for _, word := range words {
+			if field == word {
+				return true
+			}
 		}
 	}
 	return false
@@ -1103,6 +1132,7 @@ func (r *Router) HandleTrigger(ctx context.Context, fullName string, trigger Tri
 	}
 
 	if trigger.Type == "comment" {
+		wasProcessed := r.store.IsCommentProcessed(fullName, trigger.IssueNumber, trigger.CommentID)
 		if r.shouldSkipComment(fullName, trigger) {
 			r.log.Debug("skip processed comment %d", trigger.CommentID)
 			return
@@ -1114,7 +1144,8 @@ func (r *Router) HandleTrigger(ctx context.Context, fullName string, trigger Tri
 		// bot's own failure notice, which itself contains an "@agent
 		// continue" hint) must not address the agent or carry a command.
 		unquoted := stripQuotedLines(trigger.CommentBody)
-		mentioned := isMention(unquoted, r.agentLogin) || (strings.TrimSpace(unquoted) != "" && isMention(trigger.CommentBody, r.agentLogin))
+		words := strings.TrimSpace(stripMention(unquoted, r.agentLogin))
+		mentioned := isMention(unquoted, r.agentLogin) || (words != "" && isMention(trigger.CommentBody, r.agentLogin))
 		isApprover := selfComment
 		for _, login := range app.Repo.Approvers {
 			if strings.EqualFold(login, trigger.Sender) {
@@ -1286,13 +1317,9 @@ func (r *Router) HandleTrigger(ctx context.Context, fullName string, trigger Tri
 					if current.Phase != "implementing" {
 						return
 					}
-					if notes != "" {
+					if notes != "" && !wasProcessed {
 						app.Store.UpdateIssue(fullName, trigger.IssueNumber, func(state *IssueState) {
-							if strings.TrimSpace(state.ExtraNotes) == "" {
-								state.ExtraNotes = notes
-							} else {
-								state.ExtraNotes = strings.TrimSpace(state.ExtraNotes) + "\n" + notes
-							}
+							state.ExtraNotes = appendExtraNotes(state.ExtraNotes, notes)
 						})
 						app.Log.Info("owner approved %s#%d with instructions: %s", fullName, trigger.IssueNumber, notes)
 					}
@@ -1304,7 +1331,7 @@ func (r *Router) HandleTrigger(ctx context.Context, fullName string, trigger Tri
 		}
 
 		// Feedback on a pending plan rewrites the plan instead of being dropped.
-		if mentioned && strings.TrimSpace(unquoted) != "" && isApprover && st.Phase == "awaiting_approval" {
+		if mentioned && words != "" && isApprover && st.Phase == "awaiting_approval" {
 			r.enqueue(fullName, key, stagePlan, func(jobCtx context.Context) {
 				issue, err := app.GH.GetIssue(jobCtx, fullName, trigger.IssueNumber)
 				if err != nil {
@@ -1326,7 +1353,7 @@ func (r *Router) HandleTrigger(ctx context.Context, fullName string, trigger Tri
 
 		// A mention with prose (not a command) on an issue with an open PR is
 		// feedback: keep working on the same branch instead of merging.
-		if mentioned && strings.TrimSpace(unquoted) != "" && isApprover && st.Phase == "pr_open" {
+		if mentioned && words != "" && isApprover && st.Phase == "pr_open" {
 			r.enqueue(fullName, key, stageWork, func(jobCtx context.Context) {
 				issue, err := app.GH.GetIssue(jobCtx, fullName, trigger.IssueNumber)
 				if err != nil {
@@ -1341,7 +1368,7 @@ func (r *Router) HandleTrigger(ctx context.Context, fullName string, trigger Tri
 			return
 		}
 
-		r.handleUnroutedComment(ctx, app, fullName, trigger, st, unquoted, mentioned, isApprover)
+		r.handleUnroutedComment(ctx, app, fullName, trigger, st, unquoted, words, mentioned, isApprover, wasProcessed)
 		return
 	}
 
@@ -1439,12 +1466,39 @@ func (r *Router) replyToComment(ctx context.Context, app *AppContext, trigger Tr
 	r.log.Info("replied to comment %d on %s#%d (%s)", trigger.CommentID, app.Repo.FullName, trigger.IssueNumber, key)
 }
 
+// ExtraNotes is rendered verbatim into the implement prompt, so one long
+// comment must not inflate it. The caller skips a comment it already filed;
+// this only bounds a single note and the combined text. The cap mirrors the
+// plan's 55 KB prompt limit.
+const (
+	maxExtraNoteLines  = 40
+	maxExtraNotesBytes = 55000
+)
+
+// appendExtraNotes merges a comment-derived note into ExtraNotes, keeping the
+// newest lines of the note and the newest part of the combined text.
+func appendExtraNotes(existing, note string) string {
+	note = strings.TrimSpace(note)
+	if note == "" {
+		return existing
+	}
+	note = strings.TrimSpace(tailString(note, maxExtraNoteLines))
+	merged := note
+	if existing = strings.TrimSpace(existing); existing != "" {
+		merged = existing + "\n" + note
+	}
+	if len(merged) > maxExtraNotesBytes {
+		merged = strings.ToValidUTF8(merged[len(merged)-maxExtraNotesBytes:], "")
+	}
+	return merged
+}
+
 // handleUnroutedComment answers an approver comment that matched no command
 // and no task route, so the daemon never silently ignores the owner. It only
 // ever replies or files notes: it never starts work, and a non-approver
 // never reaches it (their @-mentions get the 👀 above and nothing else).
 // A comment that is only a quote has nothing new to answer and stays silent.
-func (r *Router) handleUnroutedComment(ctx context.Context, app *AppContext, fullName string, trigger Trigger, st IssueState, unquoted string, mentioned, isApprover bool) {
+func (r *Router) handleUnroutedComment(ctx context.Context, app *AppContext, fullName string, trigger Trigger, st IssueState, unquoted, words string, mentioned, isApprover, wasProcessed bool) {
 	if !isApprover || !mentioned {
 		r.log.Info("comment on %s#%d ignored (phase=%s)", fullName, trigger.IssueNumber, firstNonEmpty(st.Phase, "none"))
 		return
@@ -1453,12 +1507,15 @@ func (r *Router) handleUnroutedComment(ctx context.Context, app *AppContext, ful
 		r.log.Info("comment on %s#%d ignored (quote only)", fullName, trigger.IssueNumber)
 		return
 	}
-	words := strings.TrimSpace(stripMention(unquoted, r.agentLogin))
 	if words == "" {
 		r.replyToComment(ctx, app, trigger, "router.reply.ack")
 		return
 	}
 	if isChatter(words) {
+		if st.Phase == "blocked" {
+			r.replyToComment(ctx, app, trigger, "router.reply.retry_hint", r.agentLogin)
+			return
+		}
 		r.log.Info("comment on %s#%d ignored (chatter)", fullName, trigger.IssueNumber)
 		return
 	}
@@ -1476,15 +1533,17 @@ func (r *Router) handleUnroutedComment(ctx context.Context, app *AppContext, ful
 			}
 			return
 		}
+		// An edit is re-delivered with Trigger.Reprocess; the original note is
+		// already in ExtraNotes, so keep it instead of duplicating the text.
+		if wasProcessed {
+			r.log.Info("edited comment %d on %s#%d already filed; keeping previous notes", trigger.CommentID, fullName, trigger.IssueNumber)
+			return
+		}
 		// Extra instructions for the retry: the implement prompt renders
 		// ExtraNotes, so they are carried into the next run.
 		note := strings.TrimSpace(words)
 		app.Store.UpdateIssue(fullName, trigger.IssueNumber, func(state *IssueState) {
-			if strings.TrimSpace(state.ExtraNotes) == "" {
-				state.ExtraNotes = note
-			} else {
-				state.ExtraNotes = strings.TrimSpace(state.ExtraNotes) + "\n" + note
-			}
+			state.ExtraNotes = appendExtraNotes(state.ExtraNotes, note)
 		})
 		r.replyToComment(ctx, app, trigger, "router.reply.notes_saved", r.agentLogin)
 	case "planning", "implementing":
@@ -1571,10 +1630,20 @@ func (r *Router) HandleReopened(ctx context.Context, fullName string, issue Issu
 			state.IssueClosed = false
 		})
 	} else {
+		// A cancelled round is over: its PR is closed and its worktree may be
+		// gone. Leaving PRNumber set would re-arm "@bot merge" against the dead
+		// PR once the fresh plan fails into blocked.
 		app.Store.UpdateIssue(fullName, issue.Number, func(state *IssueState) {
 			state.Phase = "new"
 			state.CancelledAt = ""
 			state.IssueClosed = false
+			state.PRNumber = 0
+			state.PRURL = ""
+			state.Branch = ""
+			state.Worktree = ""
+			state.SessionID = ""
+			state.MergedAt = ""
+			state.BlockedReason = ""
 		})
 	}
 	r.HandleTrigger(ctx, fullName, Trigger{

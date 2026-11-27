@@ -52,6 +52,44 @@ func commentTrigger(body, sender string) Trigger {
 	}
 }
 
+// newOpenCommentRouter builds a router whose fake API reports the issue as
+// open and whose Local points at a missing remote. A stage a test really
+// reaches therefore fails at its first git step instead of bailing on a closed
+// issue before doing anything.
+func newOpenCommentRouter(t *testing.T, phase string, setup func(*IssueState)) (*Router, *Store, *callLog) {
+	t.Helper()
+	store := &Store{file: filepath.Join(t.TempDir(), "state.json"), state: State{Version: 1, Repos: map[string]*RepoState{}}}
+	store.UpdateIssue("acme/app", 5, func(st *IssueState) {
+		st.Phase = phase
+		if setup != nil {
+			setup(st)
+		}
+	})
+	gh, calls := newFakeAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/issues/5"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"state": "open", "number": 5, "title": "add a flag", "body": "add --json",
+			})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/issues/5/comments"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": 99})
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	})
+	app := &AppContext{
+		Cfg:        &Config{PlanParallel: 1, ImplementParallel: 1},
+		Repo:       RepoConfig{FullName: "acme/app", Approvers: []string{"owner"}, Language: "zh"},
+		Local:      &LocalRepo{HTTPSURL: filepath.Join(t.TempDir(), "missing.git"), Base: "master", WorktreeRoot: t.TempDir()},
+		GH:         gh,
+		Store:      store,
+		Log:        NewSilentLogger(),
+		AgentLogin: "bot",
+	}
+	router := NewRouter(app.Cfg, map[string]*AppContext{"acme/app": app}, "bot", store, NewSilentLogger())
+	return router, store, calls
+}
+
 // postedCommentBody returns the body of a comment the router posted on the
 // issue, if any.
 func postedCommentBody(t *testing.T, calls *callLog) (string, bool) {
@@ -62,6 +100,16 @@ func postedCommentBody(t *testing.T, calls *callLog) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func postedCommentCount(calls *callLog) int {
+	count := 0
+	for _, call := range calls.snapshot() {
+		if call.method == http.MethodPost && strings.HasSuffix(call.path, "/issues/5/comments") {
+			count++
+		}
+	}
+	return count
 }
 
 func reactedWith(t *testing.T, calls *callLog, content string) bool {
@@ -110,6 +158,19 @@ func TestBlockedQuestionRepliesWithReason(t *testing.T) {
 	}
 }
 
+// A polite opener does not turn a real question into retry notes.
+func TestBlockedPoliteQuestionRepliesWithReason(t *testing.T) {
+	router, store, calls := newCommentRouter(t, "blocked", "fetch base: boom")
+	router.HandleTrigger(context.Background(), "acme/app", commentTrigger("@bot Could you tell me why it failed?", "owner"))
+	if got := store.Issue("acme/app", 5).ExtraNotes; got != "" {
+		t.Fatalf("ExtraNotes = %q, want empty", got)
+	}
+	body, ok := postedCommentBody(t, calls)
+	if !ok || !strings.Contains(body, "fetch base: boom") {
+		t.Fatalf("reply = %q, present=%v; want the failure reason", body, ok)
+	}
+}
+
 // An instruction on a blocked issue is filed as ExtraNotes for the retry.
 func TestBlockedInstructionSavedAsNotes(t *testing.T) {
 	router, store, calls := newCommentRouter(t, "blocked", "fetch base: boom")
@@ -123,6 +184,72 @@ func TestBlockedInstructionSavedAsNotes(t *testing.T) {
 	}
 	if !strings.Contains(body, "记下了") {
 		t.Fatalf("reply = %q, want the notes-saved acknowledgment", body)
+	}
+}
+
+// A huge comment must not become a huge implement prompt, and an edited
+// comment must not append its note a second time.
+func TestBlockedNotesAreBoundedAndNotDuplicated(t *testing.T) {
+	router, store, calls := newCommentRouter(t, "blocked", "fetch base: boom")
+	huge := strings.Repeat("x", 64000)
+	router.HandleTrigger(context.Background(), "acme/app", commentTrigger("@bot "+huge, "owner"))
+	notes := store.Issue("acme/app", 5).ExtraNotes
+	if len(notes) > maxExtraNotesBytes {
+		t.Fatalf("ExtraNotes is %d bytes, want at most %d", len(notes), maxExtraNotesBytes)
+	}
+	if !strings.HasSuffix(notes, strings.Repeat("x", 100)) {
+		t.Fatal("ExtraNotes kept the wrong part of the comment")
+	}
+	if got := postedCommentCount(calls); got != 1 {
+		t.Fatalf("posted %d comments, want 1", got)
+	}
+
+	edited := commentTrigger("@bot "+huge, "owner")
+	edited.Reprocess = true
+	router.HandleTrigger(context.Background(), "acme/app", edited)
+	if got := store.Issue("acme/app", 5).ExtraNotes; got != notes {
+		t.Fatalf("edited comment changed ExtraNotes from %d to %d bytes", len(notes), len(got))
+	}
+	if got := postedCommentCount(calls); got != 1 {
+		t.Fatalf("edited comment posted %d comments, want the original 1", got)
+	}
+}
+
+func TestBlockedNoteKeepsNewestLines(t *testing.T) {
+	router, store, _ := newCommentRouter(t, "blocked", "fetch base: boom")
+	lines := make([]string, 0, 100)
+	for i := 1; i <= 100; i++ {
+		lines = append(lines, fmt.Sprintf("line %d", i))
+	}
+	router.HandleTrigger(context.Background(), "acme/app", commentTrigger("@bot "+strings.Join(lines, "\n"), "owner"))
+	notes := store.Issue("acme/app", 5).ExtraNotes
+	if !strings.Contains(notes, "line 100") {
+		t.Fatalf("ExtraNotes = %q, want the newest line", notes)
+	}
+	if strings.Contains(notes, "line 1\n") {
+		t.Fatalf("ExtraNotes = %q, want only the tail of a long note", notes)
+	}
+}
+
+// A bare @bot is a mention, not an instruction: it must not spend a plan or
+// revise run, and it gets the same acknowledgment as other no-op comments.
+func TestBareMentionIsAcknowledgedNotRun(t *testing.T) {
+	for _, phase := range []string{"awaiting_approval", "pr_open"} {
+		t.Run(phase, func(t *testing.T) {
+			router, store, calls := newCommentRouter(t, phase, "")
+			router.HandleTrigger(context.Background(), "acme/app", commentTrigger("@bot", "owner"))
+			router.waitInactive(context.Background(), "acme/app#5", 5*time.Second)
+			if got := store.Issue("acme/app", 5).Phase; got != phase {
+				t.Fatalf("phase = %q, want %q", got, phase)
+			}
+			if hasIssueRead(calls) {
+				t.Fatal("a bare mention enqueued a stage")
+			}
+			body, ok := postedCommentBody(t, calls)
+			if !ok || !strings.Contains(body, "收到") {
+				t.Fatalf("reply = %q, present=%v; want the acknowledgment", body, ok)
+			}
+		})
 	}
 }
 
@@ -278,31 +405,34 @@ func hasIssueRead(calls *callLog) bool {
 }
 
 func TestQuoteReplyProseOnAwaitingApprovalRegeneratesPlan(t *testing.T) {
-	router, store, calls := newCommentRouter(t, "awaiting_approval", "")
+	router, store, calls := newOpenCommentRouter(t, "awaiting_approval", nil)
 	router.HandleTrigger(context.Background(), "acme/app", commentTrigger(failureQuote+"\n\n改成用 flag 而不是 env", "owner"))
 	router.waitInactive(context.Background(), "acme/app#5", 5*time.Second)
-	if got := store.Issue("acme/app", 5).Phase; got != "awaiting_approval" {
-		t.Fatalf("phase = %q, want awaiting_approval", got)
+	state := store.Issue("acme/app", 5)
+	if state.Phase != "blocked" || !strings.Contains(state.BlockedReason, "fetch base:") {
+		t.Fatalf("quoted plan feedback did not reach doPlan (phase=%q reason=%q)", state.Phase, state.BlockedReason)
 	}
 	if !reactedWith(t, calls, "eyes") {
 		t.Fatal("quoted feedback did not receive acknowledgment")
-	}
-	if !hasIssueRead(calls) {
-		t.Fatal("quoted plan feedback did not enqueue replanning")
 	}
 }
 func TestQuoteReplyProseOnPROpenRevises(t *testing.T) {
-	router, store, calls := newCommentRouter(t, "pr_open", "")
+	router, store, calls := newOpenCommentRouter(t, "pr_open", func(st *IssueState) {
+		st.PRNumber = 9
+		st.Branch = "agent/issue-5-test"
+		st.Worktree = filepath.Join(t.TempDir(), "gone")
+	})
 	router.HandleTrigger(context.Background(), "acme/app", commentTrigger(failureQuote+"\n\n改成用 flag 而不是 env", "owner"))
 	router.waitInactive(context.Background(), "acme/app#5", 5*time.Second)
-	if got := store.Issue("acme/app", 5).Phase; got != "pr_open" {
-		t.Fatalf("phase = %q, want pr_open", got)
+	state := store.Issue("acme/app", 5)
+	// doRevise validates the PR and worktree before touching the network, so
+	// this reason proves the revision stage ran instead of the job bailing on
+	// a closed issue.
+	if state.Phase != "blocked" || !strings.Contains(state.BlockedReason, "worktree") || !strings.Contains(state.BlockedReason, "is gone") {
+		t.Fatalf("quoted PR feedback did not reach doRevise (phase=%q reason=%q)", state.Phase, state.BlockedReason)
 	}
 	if !reactedWith(t, calls, "eyes") {
 		t.Fatal("quoted feedback did not receive acknowledgment")
-	}
-	if !hasIssueRead(calls) {
-		t.Fatal("quoted PR feedback did not enqueue revision")
 	}
 }
 func TestNonApproverMentionOnNewIssueDoesNotStartPlan(t *testing.T) {
@@ -327,10 +457,14 @@ func TestNonApproverMentionOnNewIssueDoesNotStartPlan(t *testing.T) {
 func TestBlockedChatterIsNotSaved(t *testing.T) {
 	for _, body := range []string{"thanks", "looks good", "谢谢", "好的", "收到", "thanks, looks good", "thanks, looks good!", "thank you, looks good", "好的，谢谢"} {
 		t.Run(body, func(t *testing.T) {
-			router, store, _ := newCommentRouter(t, "blocked", "failure")
+			router, store, calls := newCommentRouter(t, "blocked", "failure")
 			router.HandleTrigger(context.Background(), "acme/app", commentTrigger("@bot "+body, "owner"))
 			if got := store.Issue("acme/app", 5).ExtraNotes; got != "" {
 				t.Fatalf("ExtraNotes = %q, want empty", got)
+			}
+			reply, ok := postedCommentBody(t, calls)
+			if !ok || !strings.Contains(reply, "重试") {
+				t.Fatalf("reply = %q, present=%v; want the retry hint instead of silence", reply, ok)
 			}
 		})
 	}
@@ -362,12 +496,23 @@ func TestReopeningCancelledIssueStartsFreshPlanning(t *testing.T) {
 	store.UpdateIssue("acme/app", 5, func(st *IssueState) {
 		st.Plan = "stale plan"
 		st.IssueClosed = true
+		st.PRNumber = 12
+		st.PRURL = "https://github.com/acme/app/pull/12"
+		st.Branch = "agent/issue-5-old"
+		st.Worktree = "/tmp/gone"
+		st.SessionID = "old-session"
+		st.MergedAt = "2026-01-01T00:00:00Z"
+		st.BlockedReason = "fetch base: boom"
 	})
 	router.HandleReopened(context.Background(), "acme/app", Issue{Number: 5, State: "open", User: User{Login: "owner"}})
 	router.waitInactive(context.Background(), "acme/app#5", 5*time.Second)
 	state := store.Issue("acme/app", 5)
 	if state.Phase != "new" || state.IssueClosed || state.CancelledAt != "" {
 		t.Fatalf("reopened state = %+v, want fresh new phase", state)
+	}
+	if state.PRNumber != 0 || state.PRURL != "" || state.Branch != "" || state.Worktree != "" ||
+		state.SessionID != "" || state.MergedAt != "" || state.BlockedReason != "" {
+		t.Fatalf("reopened state kept the cancelled round: %+v", state)
 	}
 }
 
