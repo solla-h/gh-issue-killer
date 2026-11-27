@@ -65,7 +65,8 @@ flowchart LR
   一个慢仓库堵不住别的。
 - **可选定时发版。** 仓库可以开启自动发版：默认分支有新提交时，`feat:` 提交升
   第二位版本号、其余提交升第三位，按每天或每隔几天、在配置的本地时间（默认
-  09:00）发版。重大版本（major）由人工打 tag。默认关闭，按项目单独配置。
+  09:00）发版。标签默认带 `v` 前缀，也可以选择发布 `1.2.3` 这种无前缀标签。
+  重大版本（major）由人工打 tag。默认关闭，按项目单独配置。
 - **内置 GitHub 登录。** 不用装 `gh` 或 wrapper：桌面版/看板里点一下就用
   GitHub Device Flow 登录小号，token 存在 `~/.issuekiller/token`（0600），
   快过期时自动续期；也支持粘贴 token。
@@ -81,10 +82,16 @@ flowchart LR
 点一下就执行，取消任务则会先确认。主题可跟随系统或固定
 日间/夜间，界面可中英文切换、右上角图标栏可跳转本项目并显示仓库星数，还能在宽屏/窄屏布局间切换，任务列表可按项目过滤（下拉可选、支持键盘）或搜索、
 也可隐藏已完成和已取消，控制台按级别给日志配色，顶部显示“待我处理”的任务数
-（待批准、待合并、被阻塞），只有大于 0 时才放大高亮。设置面板可改仓库（列表展示，
-可逐项删除，下方输入框添加）、编码代理、模型、代理、更新镜像，
-以及每个项目的定时发版，并显示守护进程的版本、pid、身份、事件来源和配置文件
-路径。看板本身是 `frontend/` 里的 SvelteKit 应用（Tailwind + shadcn-svelte
+（待批准、待合并、被阻塞），只有大于 0 时才放大高亮。设置面板分为登录、仓库、配置、
+更新四个标签页，一次只显示一张卡片；仓库页用下拉选择项目，选中后只改这个项目的编码代理、
+模型、语言和定时发版，上方的默认设置条显示全局的代理、模型与代理地址；配置页改这些全局默认值
+（编码代理、模型、代理、更新镜像、看板端口），更新页显示守护进程的版本、pid、身份、事件来源和
+配置文件路径。任何一项留在“跟随全局”时，都不会把当前的全局值写进该项目的配置。
+另有独立的**项目**页（顶部“任务板 / 项目”导航，`/projects`）：先秒出全部项目，再在后台检查
+bot 账号在其中的权限，可以添加或移除项目，并标出 bot 缺少 Write（开不了 PR）或
+Admin（建不了 webhook）的仓库，附一键跳转到该仓库的协作者设置。添加/移除会保持 `config.json` 原有的写法、走与设置页相同的校验，
+然后重启守护进程。看板本身是
+`frontend/` 里的 SvelteKit 应用（Tailwind + shadcn-svelte
 主题）；发布产物已内嵌构建结果，从源码构建前需要先跑
 `npm --prefix frontend run build`。
 
@@ -161,8 +168,18 @@ go build -o bin/issuekiller ./cmd/issuekiller
 | `@agent cancel`、`@agent stop`、`@agent 停止` | 中止当前任务 |
 | plan 评论上的 👍 | 等同 `@agent lgtm` |
 | PR 公告评论上的 👍 | 等同 `@agent 合并` |
-| bot 那条「Review 已提交」评论上的 👍 | 按这条 review 的意见直接改 PR 并推送 |
+| bot 那条「Review 已提交」评论上的 👍 | 按这条 review 的意见改 PR、跑检查，通过后自动合并（该 PR 对应的 issue 会标记完成） |
 | bot 那条「出错了 / 被阻塞」评论上的 👍 | 重试被阻塞的任务（等同 `@agent continue`） |
+
+被 watch 的仓库收到新 PR 会**自动 review**（默认开启）：每个新 head 都会收到
+同样的 review（总结 + 行内意见），draft 和 bot 自己提的 PR 除外；
+点了 👍 表示接受意见之后，bot 会改代码、跑检查，通过后直接合并，不需要再操作
+（合并前关掉 PR 可以取消）；PR 上会带 `agent:awaiting-approval`（等 👍）和
+`agent:working`（处理中）标签。只想手动 review
+的仓库把 `"autoReview": false` 写进该仓库的配置。某个 head 的 review 失败后不会由
+轮询自动重试，新的 push 或 `@agent review` 才会再跑一次。review 会作为独立任务
+显示在看板上（审查中 / 已审查 / 审查失败），带 PR 标题和链接，与 issue 任务并列；
+已结束的 review 跟随「隐藏已结束」开关。
 
 每个被接受的 👍 都会立刻收到一个 👀 回应，任务还在排队或执行时也能看到已经收到。
 
@@ -180,8 +197,8 @@ bot 也会回复 @ 了它但不是命令的 approver 评论：只 @ 一下会收
 ```
 
 `-init` 会写好配置；手写就是同样的 `repos` / `codingAgent` / `approvers` /
-`proxy` 字段。完整配置项（`language`、`mode`、`webPort`、`updateProxy`、每仓库覆盖
-（含可选的定时发版）、保存即重载）见
+`proxy` 字段。完整配置项（`language`、`mode`、`autoReview`、`webPort`、
+`updateProxy`、每仓库覆盖（含可选的定时发版）、保存即重载）见
 [DEPLOY.md](DEPLOY.md#41-configuration-reference)。打开
 `selfUpdate` 后 daemon 会自己安装新版本（校验 checksums，直连失败时走
 `updateProxy` 镜像）；也可以在看板里手动检查并升级。

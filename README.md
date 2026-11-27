@@ -80,8 +80,9 @@ posts the plan, `mode: build` always skips it. See the
 - **Optional scheduled releases.** A repository can opt into publishing GitHub
   releases after its default branch moves: a `feat:` commit bumps the second
   version number, any other commit the third, once a day (or every few days) at
-  a configured local time, 09:00 by default. Major versions stay a manual
-  decision. Off by default and configured per repository.
+  a configured local time, 09:00 by default. Tags use a `v` prefix by default;
+  a repository can opt out and publish bare `1.2.3` tags. Major versions stay a
+  manual decision. Off by default and configured per repository.
 - **Built-in GitHub login.** No `gh` or wrapper to install: the desktop app and
   dashboard use GitHub Device Flow to log in a bot account, store the token in
   `~/.issuekiller/token` (0600) and refresh it before expiry; a pasted
@@ -105,10 +106,22 @@ and narrow layout; tasks can be filtered by project (a keyboard-friendly
 dropdown) or free text or hide finished/cancelled work, the console
 colours the log by level, and the header counts the tasks waiting for you
 (approval, merge or unblock), highlighting that number only when it is above
-zero. The settings panel edits the repos (a list with per-row removal and an
-add field), coding agent, model, proxy, update mirror and each project's release
-schedule, and shows the
-daemon's version, pid, identity, transport and config path. The board is a
+zero. The settings panel has four tabs (login, repositories, config, updates)
+that show one card at a time. The repositories tab picks a project from a
+dropdown and edits only that project — coding agent, model, language and its
+release schedule — while a defaults strip shows the global agent, model and
+proxy; the config tab edits those global defaults (agent, model, proxy, update
+mirror, board port) and the updates tab shows the daemon's version, pid,
+identity, transport and config path. Any per-project field left on "follow
+global" keeps the override out of the config file. A separate **Projects** page
+(the 看板/项目 switch in the header, `/projects`) lists every watched repository
+instantly and checks the bot account's role in the background, adds or removes
+a project, and flags the repositories where the bot lacks Write (no PRs) or
+Admin (no webhook), with a direct link to the repository's collaborator
+settings. Add and remove keep the
+config file's existing shape, validate it like the settings save, and restart
+the daemon.
+The board is a
 SvelteKit app in `frontend/` (Tailwind + shadcn-svelte theme); release binaries
 embed its build output, and a source build needs
 `npm --prefix frontend run build` first.
@@ -195,8 +208,20 @@ Open an issue that mentions the bot (or assign it to the bot). Then:
 | `@agent cancel`, `@agent stop`, `@agent 停止` | abort the current task |
 | 👍 on the plan comment | same as `@agent lgtm` |
 | 👍 on the PR-announcement comment | same as `@agent 合并` |
-| 👍 on the bot's “Review 已提交” comment | apply that review's findings to the PR (edit + push) |
+| 👍 on the bot's “Review 已提交” comment | apply the findings, run the checks and merge the PR once they pass (a tracked issue that opened that PR is marked done) |
 | 👍 on the bot's “Something went wrong” / blocked comment | retry the blocked task (same as `@agent continue`) |
+
+A new pull request in a watched repo is reviewed **automatically** (on by
+default): every new head gets the same review with inline findings, while
+drafts and the bot's own PRs are left alone.
+When the review findings are accepted with 👍, the bot fixes the PR, reruns the
+checks and merges it in one go; the PR carries `agent:awaiting-approval` while
+it waits for that 👍 and `agent:working` while it runs, so the labels show the
+state on the PR itself. A repo that only wants the manual
+command sets `"autoReview": false`; a failed review is retried by a new push or
+`@agent review`, not by the poller. Reviews appear on the dashboard as their own
+tasks (reviewing / reviewed / failed) with the PR title and link, next to the
+issue tasks; finished reviews follow the hide-finished toggle.
 
 Every accepted 👍 gets an 👀 reaction immediately, so you can see the daemon
 picked it up while the work is still running.
@@ -220,8 +245,8 @@ and [DEVELOP.md](DEVELOP.md).
 
 `-init` writes the config for you; a hand-written JSON uses the same `repos` /
 `codingAgent` / `approvers` / `proxy` keys. Full reference (`language`, `mode`,
-`webPort`, `updateProxy`, per-repo overrides including the opt-in `release`
-schedule, live reload):
+`autoReview`, `webPort`, `updateProxy`, per-repo overrides including the
+opt-in `release` schedule, live reload):
 [DEPLOY.md](DEPLOY.md#41-configuration-reference). With `selfUpdate` on, the
 daemon installs new releases itself (checksums verified, `updateProxy` mirror
 when github.com is unreachable); the dashboard can also check and install on

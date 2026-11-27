@@ -11,17 +11,20 @@ import (
 // Periodic release publishing. A repository opts in with release.enabled; the
 // daemon then checks the default branch at most once per intervalDays, on the
 // configured local time (release.time, 09:00 by default), and publishes a
-// GitHub release when it moved past the newest v* tag, or v0.1.0 when the
+// GitHub release when it moved past the newest version tag, or v0.1.0 when the
 // repository has no version tag yet. Everything here is deliberately small: the
 // tag is the only version source, and the conventional-commit subject decides
 // whether the batch is a feature.
 
 const (
-	// releaseTick re-evaluates each repo's schedule; the config interval and
-	// time decide whether that tick may call GitHub. Hourly keeps the daemon's
-	// clock coarse: a scheduled time publishes on the first tick after it, so
-	// within an hour, without waking up per repository.
+	// releaseTick is the longest a release loop sleeps. The loop normally wakes
+	// at the configured time (see nextReleaseCheck); the hourly cap is the
+	// safety net for clock changes and keeps the pre-slot period cheap.
 	releaseTick = time.Hour
+	// releaseRetry is how long a loop waits after a failed check. The failure
+	// leaves the last-check timestamp untouched, so without a floor the slot
+	// would look due and the loop would hit GitHub in a tight loop.
+	releaseRetry = 15 * time.Minute
 	// releaseCommitLimit caps the first release of a repository, which has no
 	// previous tag to compare against.
 	releaseCommitLimit = 100
@@ -44,13 +47,26 @@ func versionFromTag(tag string) (releaseVersion, bool) {
 	return releaseVersion{Major: parts[0], Minor: parts[1], Patch: parts[2]}, true
 }
 
+// String renders the version with the default v prefix.
 func (v releaseVersion) String() string {
-	return fmt.Sprintf("v%d.%d.%d", v.Major, v.Minor, v.Patch)
+	return v.Tag(true)
 }
 
-// latestVersionTag returns the highest v* tag. Non-version tags are ignored so
-// a repository's own labels cannot disturb the sequence. A repository without
-// any version tag returns ok=false; checkRelease then publishes initialRelease.
+// Tag renders the release tag with or without the leading v, following
+// release.vPrefix. Existing tags are always parsed with either form, so
+// switching the prefix keeps the numeric sequence intact.
+func (v releaseVersion) Tag(vPrefix bool) string {
+	if vPrefix {
+		return fmt.Sprintf("v%d.%d.%d", v.Major, v.Minor, v.Patch)
+	}
+	return fmt.Sprintf("%d.%d.%d", v.Major, v.Minor, v.Patch)
+}
+
+// latestVersionTag returns the highest version tag, with or without the v
+// prefix. Non-version tags are ignored so a repository's own labels cannot
+// disturb the sequence; a repository that switched release.vPrefix keeps
+// counting from its older v* tags. A repository without any version tag
+// returns ok=false; checkRelease then publishes initialRelease.
 func latestVersionTag(tags []Tag) (releaseVersion, string, bool) {
 	best := ""
 	for _, tag := range tags {
@@ -154,6 +170,35 @@ func releaseDue(lastCheck string, intervalDays int, at string, now time.Time) bo
 	return !now.Before(slot)
 }
 
+// nextReleaseCheck returns how long the loop may sleep before its next check.
+// The wake-up is the slot itself, so a 09:00 release publishes at 09:00
+// instead of at the next hourly tick. The result is capped at releaseTick and
+// floored at zero; the caller replaces zero with releaseRetry after a failure.
+func nextReleaseCheck(lastCheck string, intervalDays int, at string, now time.Time) time.Duration {
+	hour, minute, err := parseReleaseTime(at)
+	if err != nil {
+		hour, minute = 9, 0
+	}
+	if intervalDays < 1 {
+		intervalDays = 1
+	}
+	// Never checked: wait for today's slot; a startup after the slot is due
+	// immediately (releaseDue treats it the same way).
+	base, interval := now, 0
+	if checked, err := time.Parse(time.RFC3339, strings.TrimSpace(lastCheck)); err == nil {
+		base, interval = checked.In(now.Location()), intervalDays
+	}
+	slot := time.Date(base.Year(), base.Month(), base.Day()+interval, hour, minute, 0, 0, now.Location())
+	delay := slot.Sub(now)
+	if delay < 0 {
+		delay = 0
+	}
+	if delay > releaseTick {
+		delay = releaseTick
+	}
+	return delay
+}
+
 // parseReleaseTime reads the local publish time of day. Empty means the
 // default; H:MM is accepted so a hand-edited config does not fail over a
 // missing zero. Anything else is an error: a typo must not silently move a
@@ -187,7 +232,7 @@ func commitTitle(commit Commit) string {
 // verbatim so the release follows the repository's own commit language; a
 // release has no issue or PR to detect a scaffolding language from, so the
 // compare footer is the only fixed line and matches GitHub's own format.
-func releaseNotes(fullName, previous string, version releaseVersion, commits []Commit) string {
+func releaseNotes(fullName, previous, tag string, commits []Commit) string {
 	var builder strings.Builder
 	for _, commit := range commits {
 		title := commitTitle(commit)
@@ -201,7 +246,7 @@ func releaseNotes(fullName, previous string, version releaseVersion, commits []C
 		}
 	}
 	if previous != "" {
-		fmt.Fprintf(&builder, "\n**Full Changelog**: https://github.com/%s/compare/%s...%s\n", fullName, previous, version)
+		fmt.Fprintf(&builder, "\n**Full Changelog**: https://github.com/%s/compare/%s...%s\n", fullName, previous, tag)
 	}
 	return strings.TrimRight(builder.String(), "\n")
 }
@@ -260,21 +305,23 @@ func checkRelease(ctx context.Context, app *AppContext) error {
 	if tagged {
 		next = nextReleaseVersion(current, titles)
 	}
-	notes := releaseNotes(app.Repo.FullName, previous, next, commits)
-	if _, err := app.GH.CreateRelease(ctx, app.Repo.FullName, next.String(), next.String(), notes, base); err != nil {
-		return fmt.Errorf("create release %s: %w", next, err)
+	tag := next.Tag(cfg.VPrefix)
+	notes := releaseNotes(app.Repo.FullName, previous, tag, commits)
+	if _, err := app.GH.CreateRelease(ctx, app.Repo.FullName, tag, tag, notes, base); err != nil {
+		return fmt.Errorf("create release %s: %w", tag, err)
 	}
 	app.Store.UpdateMeta(app.Repo.FullName, func(meta *RepoMeta) {
 		meta.LastReleaseCheckAt = nowISO()
 	})
-	app.Log.Info("%s: published release %s (%d commits since %s)", app.Repo.FullName, next, len(commits), firstNonEmpty(previous, "the first commit"))
+	app.Log.Info("%s: published release %s (%d commits since %s)", app.Repo.FullName, tag, len(commits), firstNonEmpty(previous, "the first commit"))
 	return nil
 }
 
-// startReleaseChecker runs one loop per opted-in repository. The repo is
-// checked at startup and then every releaseTick; each check is independent, so
-// a slow GitHub call in one repo does not delay the others and nothing touches
-// the poller or the job queues.
+// startReleaseChecker runs one loop per opted-in repository. Each loop checks
+// at startup and then sleeps until its own slot (nextReleaseCheck), so a 09:00
+// release is published at 09:00 rather than on the next hourly tick; the
+// checks stay independent, so a slow GitHub call in one repo does not delay the
+// others and nothing touches the poller or the job queues.
 func startReleaseChecker(ctx context.Context, contexts map[string]*AppContext, log *Logger) func() {
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
@@ -293,15 +340,25 @@ func startReleaseChecker(ctx context.Context, contexts map[string]*AppContext, l
 				}
 			}
 			check()
-			ticker := time.NewTicker(releaseTick)
-			defer ticker.Stop()
 			for {
+				cfg := app.Repo.Release
+				lastCheck := app.Store.Meta(name).LastReleaseCheckAt
+				delay := nextReleaseCheck(lastCheck, cfg.IntervalDays, cfg.Time, time.Now())
+				if delay <= 0 {
+					// The slot just passed but the timestamp did not move: the
+					// check failed (a success always records the time), or the
+					// clock jumped. Retry later instead of spinning on GitHub.
+					delay = releaseRetry
+				}
+				timer := time.NewTimer(delay)
 				select {
 				case <-stop:
+					timer.Stop()
 					return
 				case <-ctx.Done():
+					timer.Stop()
 					return
-				case <-ticker.C:
+				case <-timer.C:
 					check()
 				}
 			}
@@ -310,7 +367,7 @@ func startReleaseChecker(ctx context.Context, contexts map[string]*AppContext, l
 	if enabled == 0 {
 		log.Debug("release checks disabled (no repo sets release.enabled)")
 	} else {
-		log.Info("release checks started for %d repo(s), tick %s", enabled, releaseTick)
+		log.Info("release checks started for %d repo(s); each wakes at its release time", enabled)
 	}
 	return func() {
 		close(stop)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -238,6 +239,9 @@ type Router struct {
 	queued     map[string]bool
 	cancels    map[string]context.CancelFunc
 	started    map[string]time.Time
+	// prLocks serializes the jobs that write one pull request's branch; see
+	// serialize.
+	prLocks map[string]*sync.Mutex
 }
 
 func NewRouter(cfg *Config, contexts map[string]*AppContext, agentLogin string, store *Store, log *Logger) *Router {
@@ -252,6 +256,7 @@ func NewRouter(cfg *Config, contexts map[string]*AppContext, agentLogin string, 
 		queued:     map[string]bool{},
 		cancels:    map[string]context.CancelFunc{},
 		started:    map[string]time.Time{},
+		prLocks:    map[string]*sync.Mutex{},
 	}
 	planWorkers := cfg.PlanParallel
 	if planWorkers < 1 {
@@ -370,7 +375,71 @@ func (r *Router) enqueue(fullName, key string, stage jobStage, fn func(context.C
 	case stageCI:
 		queue = pool.ci
 	}
-	queue <- routerJob{key: key, ctx: jobCtx, fn: fn}
+	queue <- routerJob{key: key, ctx: jobCtx, fn: r.serialize(fullName, key, stage, fn)}
+}
+
+// serialize holds one lock per pull request for the whole work job. The issue
+// flow (revise, merge) and the PR flow (review fix, merge PR) reach the same
+// branch under different job keys, so the key alone cannot keep them apart:
+// without the lock the second push is a non-fast-forward and the task parks as
+// blocked. CI settle jobs are deliberately excluded, because a merge job waits
+// for its CI job and both taking the lock would deadlock.
+func (r *Router) serialize(fullName, key string, stage jobStage, fn func(context.Context)) func(context.Context) {
+	if stage != stageWork {
+		return fn
+	}
+	return func(ctx context.Context) {
+		unlock := r.lockPR(fullName, r.prNumberFor(fullName, key))
+		defer unlock()
+		if ctx.Err() != nil {
+			return
+		}
+		fn(ctx)
+	}
+}
+
+// prNumberFor maps a job key to the pull request it may write: a review or
+// merge key already names the PR, while an issue job only carries the issue
+// number and learns the PR from the state.
+func (r *Router) prNumberFor(fullName, key string) int {
+	number := jobNumber(key)
+	if number == 0 || r.store == nil {
+		return number
+	}
+	if st := r.store.Issue(fullName, number); st.PRNumber > 0 {
+		return st.PRNumber
+	}
+	return number
+}
+
+func (r *Router) lockPR(fullName string, number int) func() {
+	if number <= 0 {
+		return func() {}
+	}
+	key := fmt.Sprintf("%s#%d", fullName, number)
+	r.mu.Lock()
+	lock := r.prLocks[key]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		r.prLocks[key] = lock
+	}
+	r.mu.Unlock()
+	lock.Lock()
+	return lock.Unlock
+}
+
+// jobNumber reads the number a job key names: "<repo>#<n>" or
+// "<repo>#<n>#suffix", where the repo itself never contains a '#'.
+func jobNumber(key string) int {
+	parts := strings.SplitN(key, "#", 3)
+	if len(parts) < 2 {
+		return 0
+	}
+	number, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return 0
+	}
+	return number
 }
 
 func (r *Router) cancelActive(fullName string, number int) {
@@ -586,14 +655,70 @@ func (r *Router) enqueueReviewFix(ctx context.Context, app *AppContext, fullName
 		}
 		if strings.TrimSpace(instructions) == "" {
 			_, _ = app.GH.PostComment(jobCtx, fullName, number, app.text(number, "review.nothing"))
+			app.GH.SetAgentState(jobCtx, fullName, number, awaitingLabel)
 			return
 		}
+		// The thumbs-up approved the review, so a successful fix merges on its
+		// own: doModifyPR pushes, re-runs the checks and lands the PR.
 		doModifyPR(jobCtx, app, Trigger{
 			Type:        "reaction",
 			IssueNumber: number,
 			Sender:      login,
 			Key:         fmt.Sprintf("review-%d", time.Now().UnixNano()),
-		}, pr, instructions)
+		}, pr, instructions, true)
+	})
+}
+
+// enqueueAutoReview starts a review of a pull request without waiting for an
+// approver command. Drafts, the bot's own PRs and a head SHA that was already
+// reviewed are skipped, so a redelivered event cannot restart the same review;
+// a new push changes the SHA and reviews again, and a manual `@bot review`
+// always goes through.
+func (r *Router) enqueueAutoReview(ctx context.Context, app *AppContext, pr PullRequest) {
+	if r.store == nil {
+		return
+	}
+	if !app.Repo.AutoReview || pr.State != "open" || pr.Draft {
+		return
+	}
+	if strings.EqualFold(pr.User.Login, r.agentLogin) {
+		return
+	}
+	st := r.store.Issue(app.Repo.FullName, pr.Number)
+	if st.ReviewedSHA == pr.Head.SHA {
+		return
+	}
+	// Record the head before the job runs: a failure on this SHA must not be
+	// retried on every poll, and a second delivery of the same event is a
+	// no-op. doReviewPR overwrites it with the head it actually reviewed.
+	r.store.SetReviewedSHA(app.Repo.FullName, pr.Number, pr.Head.SHA)
+	// The review is its own dashboard task: remember the PR title and mark the
+	// row immediately, so a queued review is visible before the agent starts.
+	rememberPRMeta(app, pr)
+	r.store.SetReviewPhase(app.Repo.FullName, pr.Number, "reviewing")
+	r.log.Info("auto review queued for %s#%d (head %s)", app.Repo.FullName, pr.Number, shortSHA(pr.Head.SHA))
+	key := fmt.Sprintf("%s#%d#review", app.Repo.FullName, pr.Number)
+	r.enqueue(app.Repo.FullName, key, stagePlan, func(jobCtx context.Context) {
+		// Re-read the PR: the head may have moved since the event, and a PR
+		// that was closed or re-drafted in the meantime needs no review.
+		fresh, err := app.GH.GetPR(jobCtx, app.Repo.FullName, pr.Number)
+		if err != nil {
+			app.Log.Warn("auto review %s#%d: %v", app.Repo.FullName, pr.Number, err)
+			r.store.SetReviewPhase(app.Repo.FullName, pr.Number, "reviewfailed")
+			return
+		}
+		if fresh.State != "open" || fresh.Draft {
+			// There is nothing to review after all; drop the synthetic task
+			// instead of leaving it "reviewing" forever.
+			r.store.SetReviewPhase(app.Repo.FullName, pr.Number, "")
+			return
+		}
+		doReviewPR(jobCtx, app, Trigger{
+			Type:        "auto",
+			IssueNumber: pr.Number,
+			Sender:      pr.User.Login,
+			Key:         fmt.Sprintf("autoreview-%d", time.Now().UnixNano()),
+		}, fresh)
 	})
 }
 
@@ -1234,23 +1359,33 @@ func (r *Router) HandleTrigger(ctx context.Context, fullName string, trigger Tri
 
 		if command == "review" && isApprover {
 			reviewKey := fmt.Sprintf("%s#%d#review", fullName, trigger.IssueNumber)
+			r.store.SetReviewPhase(fullName, trigger.IssueNumber, "reviewing")
 			r.enqueue(fullName, reviewKey, stagePlan, func(jobCtx context.Context) {
+				// Nothing before doReviewPR is a review result: clear the row
+				// when the target turns out not to be reviewable.
+				clearReview := func(phase string) {
+					r.store.SetReviewPhase(fullName, trigger.IssueNumber, phase)
+				}
 				issue, err := app.GH.GetIssue(jobCtx, fullName, trigger.IssueNumber)
 				if err != nil {
 					app.Log.Warn("review %s#%d: %v", fullName, trigger.IssueNumber, err)
+					clearReview("reviewfailed")
 					return
 				}
 				if issue.State != "open" {
+					clearReview("")
 					return
 				}
 				if issue.PullRequest == nil {
 					_, _ = app.GH.PostComment(jobCtx, fullName, trigger.IssueNumber,
 						fmt.Sprintf(app.text(trigger.IssueNumber, "router.review_not_pr"), r.agentLogin))
+					clearReview("")
 					return
 				}
 				pr, err := app.GH.GetPR(jobCtx, fullName, trigger.IssueNumber)
 				if err != nil {
 					app.Log.Warn("review %s#%d: get PR: %v", fullName, trigger.IssueNumber, err)
+					clearReview("reviewfailed")
 					return
 				}
 				doReviewPR(jobCtx, app, trigger, pr)
@@ -1278,7 +1413,9 @@ func (r *Router) HandleTrigger(ctx context.Context, fullName string, trigger Tri
 						app.Log.Warn("modify PR %s#%d: %v", fullName, trigger.IssueNumber, prErr)
 						return
 					}
-					doModifyPR(jobCtx, app, trigger, pr, strings.TrimSpace(stripMention(trigger.CommentBody, r.agentLogin)))
+					// An instruction-only modify leaves the merge to the
+					// maintainer: only the review thumbs-up pre-approves it.
+					doModifyPR(jobCtx, app, trigger, pr, strings.TrimSpace(stripMention(trigger.CommentBody, r.agentLogin)), false)
 					return
 				}
 				if isRelevantIssue(issue, r.agentLogin) || mentioned {
@@ -1786,7 +1923,7 @@ func (r *Router) PollOnce(ctx context.Context, fullName string) {
 			since = &safe
 		}
 	}
-	issues, err := app.GH.ListIssues(ctx, fullName, "all", since)
+	issues, err := app.GH.ListIssuesAndPRs(ctx, fullName, "all", since)
 	if err != nil {
 		r.log.Warn("poll %s: %v", fullName, err)
 		return
@@ -1799,6 +1936,19 @@ func (r *Router) PollOnce(ctx context.Context, fullName string) {
 	freshComments := 0
 	for _, issue := range issues {
 		number := issue.Number
+		// A pull request feeds only the auto-review fallback (the webhook
+		// is the primary source); its comments still arrive through
+		// issue_comment events, so the comment scan below stays issue-only.
+		if issue.PullRequest != nil {
+			if issue.State == "open" && app.Repo.AutoReview {
+				if pr, prErr := app.GH.GetPR(ctx, fullName, number); prErr == nil {
+					r.enqueueAutoReview(ctx, app, pr)
+				} else {
+					r.log.Debug("poll %s: fetch PR %d: %v", fullName, number, prErr)
+				}
+			}
+			continue
+		}
 		st := r.store.Issue(fullName, number)
 		if issue.State == "open" && wasReopened(st) {
 			r.HandleReopened(ctx, fullName, issue)

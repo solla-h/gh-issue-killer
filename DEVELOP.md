@@ -163,13 +163,14 @@ dependencies.
 | `release.go` | opt-in periodic releases: version tag parsing, commit classification, bumping and publishing |
 | `selfupdate.go` | release asset selection, checksum verification, binary replacement, 30 min polling |
 | `logs.go` | rotating log file, `-logs` follower |
-| `shots.go` | screenshot collection, before/after composition, upload |
+| `shots.go` | screenshot collection, before/after upload, markdown rendering |
 | `proxy.go` | SOCKS5/HTTP proxies for HTTP clients, git and child processes |
 | `wizard.go` | `-init` interactive setup |
 | `web.go`, `web/dist` | loopback dashboard; embeds the SvelteKit build and serves it with an SPA fallback: `/api/state`, `/api/issue`, `/api/logs`, `/api/action`, `/api/open-url`, `/api/auth*` |
 | `webauth.go` | dashboard login endpoints: Device Flow start/poll and pasted-token fallback |
 | `openurl.go` | opens an external http(s) link in the platform browser (`open`/`xdg-open`/`rundll32`) |
 | `webconfig.go` | settings API: `/api/config`, `/api/detect`, `/api/restart`, `/api/update` |
+| `webprojects.go` | projects API: `/api/projects` lists the watched repos from the config alone (no GitHub calls), `/api/projects/access` fills in the bot account's role (`admin`/`write`/`triage`/`read`/`none`) and webhook capability, POST adds or removes one repo, keeping the config's array/keyed shape and validating it through `loadConfig` |
 | `messages.go` | scaffolding text (headings, hints, footers) in Chinese/English, `app.text`, language detection |
 | `util.go` | paths (state-dir adoption, `envValue` for renamed variables), logger, atomic writes, `tailString`, small helpers |
 | `prompts/*.md` | stage prompts (embedded via `prompts/embed.go`) |
@@ -179,7 +180,7 @@ dependencies.
 | `assets/sponsor.png` | WeChat reward QR code shown at the end of `README.zh-CN.md` (not part of the build) |
 | `desktop/` | separate Go module: Wails 3 shell (`main.go`, `engine.go`, `engine_test.go`, `process_*.go`) and `build/` packaging (icon rendered from `frontend/static/logo.svg`, `.app`, DMG) |
 | `.agents/skills/modern-web-guidance/`, `skills-lock.json` | vendored GoogleChrome modern-web-guidance skill (SKILL.md + `guides/`) and its pinned commit, Apache-2.0 / CC-BY-4.0; search it before changing dashboard CSS, layout, tables, dialogs or theme handling |
-| `frontend/` | SvelteKit SPA for the dashboard: Tailwind v4 + shadcn-svelte tokens, zh/en strings, routes and `$lib` API/i18n/theme/layout modules (`dialog.ts` wraps native dialogs and the light-dismiss fallback, `repos.ts` normalises the watched-repo list, `components/ui/select.svelte` is the dependency-free listbox select); `npm run build` writes `cmd/issuekiller/web/dist` |
+| `frontend/` | SvelteKit SPA for the dashboard: Tailwind v4 + shadcn-svelte tokens, zh/en strings, routes and `$lib` API/i18n/theme/layout modules (`dialog.ts` wraps native dialogs and the light-dismiss fallback, `repos.ts` normalises the watched-repo list, `components/ui/select.svelte` is the dependency-free listbox select); `routes/projects/+page.svelte` is the projects screen (add/remove plus the bot's role per repo); `npm run build` writes `cmd/issuekiller/web/dist` |
 
 ## 5. State model and phases
 
@@ -188,7 +189,12 @@ dependencies.
 `SessionID` (coding-agent session), `Branch`, `Worktree`, `PRNumber`, `PRURL`,
 `PRCommentID` (the 👍 target), `StatusCommentID` (the last “needs you”
 comment, also a 👍 target), `Checks`, `Screenshots`, `BlockedReason`,
-`ProcessedComments`/`ProcessedFeedback`, `MergedAt`/`CancelledAt`.
+`ProcessedComments`/`ProcessedFeedback`, `MergedAt`/`CancelledAt`,
+`ReviewedSHA` (the PR head an automatic review already covered; a pull
+request tracked only for review keeps phase empty — it is not an issue) and
+`ReviewPhase` (`reviewing`/`reviewed`/`reviewfailed`). `ReviewPhase` is a
+separate axis: the board shows it as a review task while `Phase` stays empty,
+and it never enters the issue phase machine.
 
 | phase | meaning | who sets it |
 | --- | --- | --- |
@@ -247,6 +253,25 @@ Other rules:
 - `review` is the only command that targets a PR directly. It works for any PR
   in a watched repo, not only the daemon's own, and runs on the plan queue with
   its own job key (`<repo>#<pr>#review`).
+- **Automatic review** (`enqueueAutoReview`) runs that same stage without a
+  command. The webhook delivers `pull_request` events (`opened`, `reopened`,
+  `synchronize`, `ready_for_review`; `dispatchPullRequest` re-reads the PR from
+  the API first), and `PollOnce` is the fallback when the event was lost: it
+  lists issues and PRs (`ListIssuesAndPRs`) and, for every updated PR in a repo
+  with `autoReview` (default **on**; `autoReview: false` opts out per repo),
+  fetches the PR and calls the same entry. Drafts, PRs authored by the bot
+  itself and a head SHA equal to the stored `ReviewedSHA` are skipped. The SHA
+  is recorded when the review is queued and again when `doReviewPR` succeeds,
+  so a failed review of one head is not retried on every poll — a new push
+  (new SHA) or a manual `@bot review` is the retry. The bot's own PRs are
+  covered by the issue flow's CI gate instead. PR comments are not scanned by
+  the poller: they still arrive through `issue_comment` events, so a PR costs
+  one `GET /pulls/{n}` per poll at most (only while it changes). The first
+  poll of a repository without a stored `LastPollAt` has no `since` window and
+  therefore reviews the current head of every open PR once. The review is a
+  board task of its own: enqueue and the manual command set `ReviewPhase` to
+  `reviewing`, success moves it to `reviewed`, a failed run to `reviewfailed`,
+  and the dashboard keeps the PR title and link from `SetPRMeta`.
 - A non-command mention from an approver on a pull request the daemon does not
   own is a **modification request** (`doModifyPR`): edit the PR head, run the
   checks and push back to the head branch. Same-repository branches are pushed
@@ -280,11 +305,15 @@ Other rules:
   and without the ack the approver cannot tell the reaction was seen.
 - 👎 is ignored; 👍 on the review prompt comment (`ReviewCommentID`) means
   “apply this review”: the daemon rebuilds the instructions from the review body
-  and its inline comments (`reviewInstructions`) and runs `doModifyPR` on the
-  PR. This exists because GitHub has no reactions API for review bodies, so the
-  daemon posts a small follow-up comment that carries the thumbs-up. The prompt
-  id is cleared when consumed, so the poller does not restart the fix on every
-  scan.
+  and its inline comments (`reviewInstructions`) and runs `doModifyPR` with
+  `autoMerge` on the PR. This exists because GitHub has no reactions API for
+  review bodies, so the daemon posts a small follow-up comment that carries the
+  thumbs-up. The prompt id is cleared when consumed, so the poller does not
+  restart the fix on every scan. The thumbs-up is the merge approval: once the
+  fix is pushed and the gate passes, `mergeReviewedPR` lands the PR without a
+  second confirmation (`doMergePR`), and `finishMergedPR` clears the labels and
+  marks a tracked issue that opened the PR as `done`. Closing the PR before the
+  merge lands stops it.
 - Reaction events are not always delivered, so `checkReactions` (30 s poller)
   re-checks 👍 on the plan comment, the PR announcement, the review prompt and
   a blocked task's status comment; reviewed PRs are not in a task phase, so the
@@ -329,25 +358,38 @@ Rules that keep it safe:
 - A job key is `<repo>#<issue>` (dedupe: a second command for a busy issue is
   skipped). CI jobs use `<repo>#<issue>#ci`; the plan-skipping starts use
   `<repo>#<issue>#bug` and `<repo>#<issue>#build`, so they still run on the
-  work queue under the implementation slot.
+  work queue under the implementation slot; PR reviews (manual and automatic)
+  use `<repo>#<pr>#review` on the plan queue.
 - `cancelActive` cancels every key from `issueJobKeys` (plan/work, CI and the
   plan-skipping `#bug`/`#build` starts); `HandleClosed` waits for all of them
   before the worktree is removed, so cleanup never races a running agent.
 - A merge waits for the issue's CI job (`waitCISettle`) before touching the
   worktree. Two agents never edit one worktree at the same time.
+- Work jobs also hold a per-PR lock (`Router.serialize`): the issue flow
+  (`<repo>#<issue>` revise/merge) and the PR flow (`<repo>#<pr>#reviewfix`,
+  `<repo>#<pr>#mergepr`) reach the same branch under different keys, so a
+  review fix and a revision used to push concurrently and the slower one was
+  rejected as a non-fast-forward, parking the issue as `blocked`. The lock is
+  taken when the job starts, after the state lookup that maps an issue to its
+  PR. CI settle jobs are deliberately excluded: a merge job waits for its CI
+  job, so both taking the lock would deadlock.
 - The CI queue exists so a slow gate never occupies the implementation slot;
   the coding stage only enqueues and returns.
 
 **Release schedule** (`release.go`) is not a queue: every repo with
 `release.enabled` gets one goroutine started from `main.go`. It checks at
-startup and then every `releaseTick` (one hour); `release.intervalDays` decides
-the earliest local date and `release.time` (09:00 by default) the time of day,
-so a scheduled release lands on the first tick after that slot. `releaseDue`
+startup, then sleeps until its own slot: `release.intervalDays` decides the
+earliest local date and `release.time` (09:00 by default) the time of day, and
+`nextReleaseCheck` returns the remaining time to that slot (capped at
+`releaseTick`, one hour, as a clock-change safety net). The loop therefore
+publishes at 09:00 rather than on the next hourly tick, which used to delay a
+09:00 release until 09:53 when the daemon had started at :53. `releaseDue`
 compares calendar days, not 24-hour steps, which keeps a 09:00 release at 09:00
 across a daylight-saving change; a repo that was never checked waits for today's
 slot. `RepoMeta.LastReleaseCheckAt` records a successful check (including “no
-commits”), so a failed request retries on the next tick instead of waiting a
-whole interval. Publishing never enqueues a job and never touches an issue
+commits”), so the next wake is computed from it; a failed check leaves the
+timestamp untouched, and the loop retries after `releaseRetry` (15 minutes)
+instead of spinning. Publishing never enqueues a job and never touches an issue
 worktree.
 
 ## 8. Stages (`actions.go`)
@@ -390,8 +432,9 @@ at a file or line outside the diff cannot be attached inline (GitHub answers
 422 “Path could not be resolved”), so they are listed in the review body
 instead. It then posts a “Review 已提交” comment and stores its id plus the
 review id in the PR's `IssueState`, so a 👍 on that comment applies the
-findings through `doModifyPR`. Nothing is ever pushed by the review itself and
-the worktree is removed afterwards.
+findings through `doModifyPR`. On success it also records the reviewed head in
+`ReviewedSHA`, which is what deduplicates the automatic reviews. Nothing is
+ever pushed by the review itself and the worktree is removed afterwards.
 
 **Merge PR** (`doMergePR`) — lands a PR the daemon does not own: fetch the head
 into a branch worktree, resolve conflicts with `conflict_fix.md` (merge the base,
@@ -405,7 +448,12 @@ agent with `modify_pr.md`, runs `checks.json` (with repair rounds), commits and
 pushes to `pr.Head.Ref` on `pr.Head.Repo` (`pushBranchTo`). `canPushToPR`
 allows same-repository branches and forks with `maintainer_can_modify`; without
 it the daemon comments that it cannot push. The worktree and local branch are
-removed afterwards.
+removed afterwards. It returns whether the branch was pushed, and with
+`autoMerge` (the review 👍 path) `finishPRModify` posts the update comment and
+runs `mergeReviewedPR`, which merges once the pushed head passes the gate. The
+PR carries `agent:working` while the job runs and `agent:awaiting-approval`
+when it waits for the approver; `doReviewPR` parks a freshly reviewed PR on
+`agent:awaiting-approval` so the board shows the pending decision on PRs too.
 
 **CI settle** (`settleCIGate`, runs on the CI queue) — if the repo has no
 workflows it returns immediately; otherwise it waits briefly for the new check
@@ -484,9 +532,10 @@ runs with its own timeout, output tail and exit code, collected into
 `tests`, `screenshots`, `prTitle`, `prBody`, `abort`).
 
 Screenshots are only expected for user-visible UI changes: the agent captures
-the changed region before/after, `shots.go` stacks them (before above after) with a
-divider, uploads through GitHub’s user-attachments endpoint, and the result is
-embedded in the PR and the comment. Backend/docs/test changes must not produce
+the changed region before/after, `shots.go` uploads both images through GitHub’s
+user-attachments endpoint as separate shots, and `screenshotsMarkdown` puts them
+in the PR and the comment separated by a `---` rule (a tall composite is scaled
+down until the UI is unreadable). Backend/docs/test changes must not produce
 screenshots.
 
 UI verification is tool-agnostic on purpose: prompts ask for real browser or
@@ -509,8 +558,11 @@ there is no tag yet, and publishes with `POST /repos/{repo}/releases`
 (`tag_name`, `name`, `body`, `target_commitish`, never a draft).
 
 Hooks are created per repo (`hookEvents`): `issues`, `issue_comment`,
-`reaction`, `pull_request_review`, `pull_request_review_comment`. When webhooks
-are unavailable the poller is the fallback; both funnel into `Router.Handle*`.
+`reaction`, `pull_request`, `pull_request_review`,
+`pull_request_review_comment`; `missingHookEvents` adds `pull_request` (and
+any later event) to a hook created by an older build on the next
+`ensureSmeeHook` pass. When webhooks are unavailable the poller is the
+fallback; both funnel into `Router.Handle*`.
 
 ## 12. Git and worktrees (`git.go`)
 
@@ -523,6 +575,11 @@ are unavailable the poller is the fallback; both funnel into `Router.Handle*`.
 - Push uses a one-shot `http.extraheader` with the token, built into
   `LocalRepo.Env`; nothing is written to any gitconfig.
 - `plan` uses a temporary detached worktree under `tmp/`.
+- `syncWorktreeBranch` fast-forwards an issue worktree to its branch head right
+  before a revision edits it, because a review fix can have pushed to the same
+  PR branch in the meantime. Only these branches are written by the daemon, so
+  a fast-forward is enough; a diverged history is reported as a blocked error
+  instead of being rebased or force-pushed.
 
 ## 13. Coding agents (`runner.go`)
 
@@ -570,17 +627,22 @@ mirror is ignored), `worktreeRoot` = state dir, `language` `auto` (the coding
 agent writes in the issue's or PR's language; a language tag forces one and is
 passed to the prompts as `{{LANGUAGE}}`), `mode` `auto` (`plan` always posts a
 plan comment, `build` implements directly, `auto` lets the coding agent triage;
-an unknown mode is rejected at load time). `repos` also accepts an object for
+an unknown mode is rejected at load time), `autoReview` **true** per repo (the
+automatic PR review; an explicit `autoReview: false` opts a repo out).
+`repos` also accepts an object for
 per-repo `codingAgent`/`model`/`approvers`/`worktreeRoot`/`language`/`mode`/
-`release`.
+`release`/`autoReview`.
 
 `release` is an optional per-repo block — `enabled` (false), `intervalDays`
-(1) and `time` (`09:00`, local `HH:MM`; an invalid value fails the load with an
-actionable error rather than silently moving the schedule). The bump part is not
-a config key: `release.go` bumps minor when the batch
+(1), `time` (`09:00`, local `HH:MM`; an invalid value fails the load with an
+actionable error rather than silently moving the schedule) and `vPrefix` (true;
+`false` publishes bare `MAJOR.MINOR.PATCH` tags instead of
+`vMAJOR.MINOR.PATCH`). The bump part is not a config key: `release.go` bumps
+minor when the batch
 contains a `feat`/`feature` commit subject and patch otherwise, and never
-publishes a major automatically. The newest `vMAJOR.MINOR.PATCH` tag is the
-version source; a repo without one publishes `v0.1.0` first (the bump rule only
+publishes a major automatically. The newest version tag is the
+version source, whichever prefix it uses; a repo without one publishes
+`v0.1.0` first (`0.1.0` with `vPrefix: false`; the bump rule only
 applies afterwards). Older files may still carry `bugBump`/`featureBump`; the
 decoder ignores them and a dashboard save drops them. Publishing creates the tag
 and the release in one call (`target_commitish` = default branch), so the token
@@ -588,11 +650,13 @@ needs `contents: write`, which the push-capable bot token already has.
 
 The dashboard's settings panel edits the same block: `/api/config` sends the
 one-day/09:00 defaults as `defaults.release` and renders one row per repo with
-the switch, the interval and the time; the PUT rejects `intervalDays` below 1
-(or a non-integer) and a `time` that is not `HH:MM` before the temp-file
-`loadConfig`, instead of letting the loader clamp or fall back, and strips the
+the switch, the interval, the time and the `v` prefix switch; the PUT rejects
+`intervalDays` below 1 (or a non-integer), a `time` that is not `HH:MM` and a
+non-boolean `vPrefix` before the temp-file `loadConfig`, instead of letting the
+loader clamp or fall back, and strips the
 removed bump keys. An empty `time` means “use the default” and is dropped, like
-a null; a row left off with the defaults is removed from the saved file.
+a null; `vPrefix` is written only when it differs from the default, like the
+time, and a row left off with the defaults is removed from the saved file.
 `repos` may be an array of names, an
 array of objects (`{"repo": "owner/name", ...overrides}`) or a keyed object; the
 panel keeps the existing shape and the overrides of repos that stay.
@@ -604,13 +668,14 @@ and starts it again.
 
 ## 15. Web dashboard
 
-Loopback only. Routes: `/`, `/api/state`, `/api/issue`, `/api/logs`,
+Loopback only. Routes: `/`, `/projects`, `/api/state`, `/api/issue`, `/api/logs`,
 `/api/action` (approve/cancel), `/api/open-url` (open a dashboard link in the
 system browser), `/api/auth` (login status), `/api/auth/device` (POST starts
 Device Flow, GET polls), `/api/auth/token` (paste a PAT), `/api/config` (GET raw
 file + defaults, PUT
-validated save), `/api/detect` (installed agents, model list, optional proxy and
-repo-access probes), `/api/restart`, `/api/update` (GET checks
+validated save), `/api/projects` (GET the watched repos and the bot's role on
+each, POST `add`/`remove` one repo), `/api/detect` (installed agents, model list,
+optional proxy and repo-access probes), `/api/restart`, `/api/update` (GET checks
 `releases/latest`, POST installs). The mutating routes require
 a JSON content type and a loopback `Origin`; `/api/config` runs
 `loadConfig` against a temp file before it writes, so an invalid agent, repo,
@@ -620,7 +685,10 @@ helper (`open`/`xdg-open`/`rundll32`) without a shell. Queue depth in
 `/api/state` includes `plan`, `work` and `ci`. `waiting` counts tasks whose phase
 needs the approver (`awaiting_approval`, `pr_open`, `blocked`, see
 `phaseNeedsUser`); the board can be filtered by phase, by project (the repo
-dropdown) and by free text.
+dropdown) and by free text. Tasks have a `kind`: issue rows come from `Phase`,
+review rows from `ReviewPhase` (`reviewing`, `reviewed`, `reviewfailed`) and
+carry the PR title/link. Finished rows include `done`, `cancelled`, `reviewed`
+and `reviewfailed`, so the hide-finished toggle also clears review history.
 
 The page is a client-rendered SvelteKit SPA in `frontend/` (Svelte 5 runes,
 Tailwind v4, shadcn-svelte CSS tokens). `npm run build` writes it to
@@ -633,8 +701,12 @@ to `index.html` for unknown non-asset paths. A missing `/assets/*` file is a
 404, and so is an unknown `/api/*` route. If `dist` contains no `index.html`
 the server returns a page that explains how to build the frontend.
 
-The layout is intentionally a two-row sticky masthead above a board: brand and
-primary actions on the first row, the live counters on the second. The
+The layout is intentionally a two-row sticky masthead above a board: brand,
+the board/projects switch and the primary actions on the first row, the live
+counters on the second. The switch is one segmented `<nav>` (two plain links,
+`aria-current="page"` for the selection) rather than a page-title link, so both
+screens are one tap apart; the counters row belongs to the board and the
+projects page passes `stats={false}` to drop it. The
 right-hand toolbar is a compact icon group: the GitHub link carries the
 repository's star count, then hairline dividers separate the settings, language
 and theme buttons. The icons stay visible at every width (the language button
@@ -698,21 +770,60 @@ bar submits approve (and retry after `blocked`) on the first click, because it
 is the drawer's primary action; cancel keeps the native confirmation since it
 terminates work in progress. `app.css` also
 contains scroll chaining for the top layer. The settings button opens the
-dialog with a section nav (login / config / updates), a scrolling body and a
-sticky action bar: repos as a list with a per-row remove button and an
-owner/repo input plus Add button below it (array, array of objects or object
-form, with per-repo overrides preserved; adding normalises pasted URLs, drops
-duplicates and keeps the visible order), one release row per repo (`enabled`,
-`intervalDays`, `time`, a native `<input type="time">`),
-coding agent (the same select, populated from `/api/detect`, keeping a configured
-agent that is not installed), model, proxy, `webPort`,
-`selfUpdate` and `updateProxy`, plus the version card, the update buttons and
-the System card. The first block is the GitHub login: it shows the one-time
+dialog with four mutually exclusive tabs (login / repositories / config /
+updates), a scrolling body and a sticky action bar. One `role="tablist"` serves
+both layouts — a vertical column from `md` up and a single scrolling row below
+it — and drives the same selection; the tabs use the ARIA tabs pattern (tab
+buttons with `aria-selected`, roving tabindex, arrow/Home/End keys, selection
+following focus, panels as `role="tabpanel"` with `hidden`), written by hand
+instead of with `focusgroup` so the desktop shell's WKWebView gets the same
+behaviour without a polyfill. The selected tab also carries a bar on its left
+edge (bottom edge in the narrow row) so the state is not signalled by colour
+alone.
+
+The repositories tab is per-project: a defaults strip shows the global agent,
+model and proxy with a button into the config tab, a project dropdown lists
+every watched repo (a repo with overrides is marked), and the card under it
+edits only the selected project — coding agent, model and language (each with
+a "follow global" choice that deletes the key) plus its scheduled release
+(`enabled`, `intervalDays`, `time`, a native `<input type="time">`). Adding a
+repo selects it; removing one falls back to the first. The add field accepts
+pasted URLs, drops duplicates and keeps the visible order, and the three
+`repos` shapes (array, array of objects, object keyed by name) are preserved:
+a plain name list is only rewritten as objects when some repo actually
+overrides something (helpers in `$lib/repos.ts`).
+
+The projects page (`/projects`, the board/projects switch in the masthead) is the dedicated place to
+add or remove a repository and to see whether the bot account can actually work
+in it. The page renders twice: `GET /api/projects` answers from the config and
+state alone, and `GET /api/projects/access` then asks GitHub for the token's
+role per repo (`admin`/`write`/`triage`/`read`/`none`) plus whether it may
+manage hooks, so the list is usable while the badges say “checking…”. The two
+requests exist because the role check costs two GitHub calls per repo: nine
+projects behind a proxy made the combined request take eight seconds. The
+access check runs four repos at a time and keeps the config order. The page
+explains the gap: without Write the bot cannot push branches or open PRs,
+without Admin it cannot create its own webhook (an externally managed one
+still streams). Missing access gets a guidance block with a button to the
+repository's `settings/access` page and the bot login, so the main account knows
+exactly whom to invite and with which role. Add verifies the repo is visible to
+the token before writing, then saves through the same `loadConfig` validation
+and restarts the daemon; remove keeps the other entries and their overrides.
+Both POST as `{action, repo}` and share `writeConfigDocument` with the settings
+save. Because the listener goes away for the restart, the page retries
+`/api/projects` until the new process answers instead of showing a daemon-down
+error.
+
+The config tab holds the global defaults and system knobs: coding agent (the
+same select, populated from `/api/detect`, keeping a configured agent that is
+not installed), model, proxy, `webPort`, `selfUpdate` and `updateProxy`, and the
+updates tab carries the version card, the update buttons and the System card.
+The login tab is the GitHub login: it shows the one-time
 code and authorization link, polls `/api/auth/device`, and keeps a paste-token
 fallback; a successful login writes `~/.issuekiller/token` and restarts
 into the engine. When `/api/state` reports `configError` (first run, missing
-token or a broken edit) the panel opens by itself and the save button starts
-the real engine.
+token or a broken edit) the panel opens by itself on the login tab and the save
+button starts the real engine.
 
 ## 16. Reload and self-update
 
@@ -775,31 +886,33 @@ keeps tests quiet. Notable coverage:
 | `waitforchecks_test.go` | verdict, fail-fast, stuck, required checks, base flags, approval, log report |
 | `conflict_test.go` | conflict detection, merge-API error classification, `conflictedFiles` on a real repo |
 | `cirepair_test.go` | worktree-ahead detection used to publish a stranded repair commit |
-| `review_test.go` | review command parsing, `review.json` loading, inline filtering, fallback body, review API payload |
+| `review_test.go` | review command parsing, `review.json` loading, inline filtering, fallback body, review API payload, the auto-review gate (draft/self/same head/opted-out repo), the `pull_request` webhook delivery |
 | `modifypr_test.go` | which PR heads can be pushed (same repo, fork with allow-edits-by-maintainers) |
 | `comment_edit_test.go` | edited comments are reprocessed, plain repeats stay deduped |
 | `approve_phase_test.go` | 👍 and merge move the phase as soon as they are accepted |
 | `messages_test.go` | scaffolding catalogs, `app.text` resolution, language detection |
 | `reactions_test.go` | polled 👍 on the review prompt (approver only, consumed once) |
 | `reaction_ack_test.go` | 👀 acknowledgment, status comment id remembered, 👍 on it retries |
-| `poll_scan_test.go` | periodic scans start from tracked issues and cost no request when nothing is pending |
+| `poll_scan_test.go` | periodic scans start from tracked issues and cost no request when nothing is pending; the poll auto-review fallback enqueues once per head and is skipped when the repo opts out |
 | `blocked_ci_test.go` | green-check detection, auto-resume of CI-blocked tasks, other reasons untouched |
 | `router_ci_test.go` | the CI queue does not block work; cancel stops CI jobs |
 | `gh_test.go` | label transitions and GitHub helpers |
-| `release_test.go` | version tag parsing, bump rules, commit classification, due check (calendar days and configured time), time parsing/defaults, release request body, disabled/not-due/no-commit skips |
-| `main_test.go` | proxy/env parsing, repo normalization (names, objects, object arrays), mentions and commands, quote stripping, question heuristic, closable phases, state-dir adoption of `~/.gh-issue-killer`, legacy env fallbacks |
+| `release_test.go` | version tag parsing, bump rules, commit classification, due check (calendar days and configured time), slot wake-up time (vs. the hourly cap), time parsing/defaults, release request body, disabled/not-due/no-commit skips |
+| `main_test.go` | proxy/env parsing, repo normalization (names, objects, object arrays), mentions and commands, quote stripping, question heuristic, closable phases, state-dir adoption of `~/.gh-issue-killer`, legacy env fallbacks, the `autoReview` default and opt-out |
 | `comment_reply_test.go` | quote-reply commands, fall-through replies (bare mention, blocked question/notes/chatter, running/done/cancelled), note bounds and edit dedupe, non-approver mentions get 👀 only |
 | `prompts_test.go` | every embedded prompt loads and keeps its placeholders |
 | `triage_test.go` | mode normalization, plan/build routing, triage answer parsing, explicit plan requests, direct-build start |
 | `runner_test.go` | per-agent argv construction, overlong-record draining, stage timeout and stall kill |
-| `shots_test.go` | before/after composition and screenshot markdown |
+| `shots_test.go` | separate before/after uploads, locale-suffixed captions, single-image and broken-pair handling, screenshot markdown with a `---` rule |
 | `plan_test.go` | plan text trimming |
 | `watch_test.go` | config reload fires on valid edits, ignores invalid ones |
-| `watcher_test.go` | `Store` round-trip |
-| `web_test.go` | dashboard snapshot only lists tracked tasks, `/api/open-url` validation and browser handoff, embedded SPA serving (index, hashed assets, cache headers, 404s, SPA fallback, unbuilt-frontend hint) |
+| `watcher_test.go` | `Store` round-trip, `ReviewedSHA` persistence for auto-review dedup, `ReviewPhase` persistence with an empty issue phase |
+| `web_test.go` | dashboard snapshot only lists tracked tasks and lists review-only PRs as `kind: review` rows with their `ReviewPhase`, `/api/issue` serves those review rows, `/api/open-url` validation and browser handoff, embedded SPA serving (index, hashed assets, cache headers, 404s, SPA fallback, unbuilt-frontend hint) |
 | `oauth_test.go` | Device Flow pending/slow_down/expired, token file 0600, refresh success/failure, credential precedence, 401 retry, login/paste endpoints, login panel markup |
 | `openurl_test.go` | per-platform browser command, no shell, injected runner |
 | `webconfig_test.go` | `/api/config` validation/round-trip/origin check, `release` defaults and rejection, `/api/detect` degradation, `/api/update` payload, snapshot without a router |
+| `webprojects_test.go` | `/api/projects` role payload and access URL, add verifies GitHub first and leaves the file untouched on failure, remove keeps the other repos and their overrides, all three `repos` shapes, origin check |
+| `router_prlock_test.go` | one work job per PR at a time across the issue and PR keys, CI jobs skip the PR lock, key parsing |
 | `selfupdate_test.go` | version ordering, asset selection, mirror/digest parsing, archive extraction, checksum mismatch keeps the binary |
 | `wizard_test.go` | `-init` setup wizard flows |
 | `logs_test.go`, `logging_test.go` | log rotation, follower, daemonize helpers |
