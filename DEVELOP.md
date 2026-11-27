@@ -349,14 +349,18 @@ Rules that keep it safe:
 
 **Release schedule** (`release.go`) is not a queue: every repo with
 `release.enabled` gets one goroutine started from `main.go`. It checks at
-startup and then every `releaseTick` (one hour); `release.intervalDays` decides
-the earliest local date and `release.time` (09:00 by default) the time of day,
-so a scheduled release lands on the first tick after that slot. `releaseDue`
+startup, then sleeps until its own slot: `release.intervalDays` decides the
+earliest local date and `release.time` (09:00 by default) the time of day, and
+`nextReleaseCheck` returns the remaining time to that slot (capped at
+`releaseTick`, one hour, as a clock-change safety net). The loop therefore
+publishes at 09:00 rather than on the next hourly tick, which used to delay a
+09:00 release until 09:53 when the daemon had started at :53. `releaseDue`
 compares calendar days, not 24-hour steps, which keeps a 09:00 release at 09:00
 across a daylight-saving change; a repo that was never checked waits for today's
 slot. `RepoMeta.LastReleaseCheckAt` records a successful check (including “no
-commits”), so a failed request retries on the next tick instead of waiting a
-whole interval. Publishing never enqueues a job and never touches an issue
+commits”), so the next wake is computed from it; a failed check leaves the
+timestamp untouched, and the loop retries after `releaseRetry` (15 minutes)
+instead of spinning. Publishing never enqueues a job and never touches an issue
 worktree.
 
 ## 8. Stages (`actions.go`)
@@ -864,7 +868,7 @@ keeps tests quiet. Notable coverage:
 | `blocked_ci_test.go` | green-check detection, auto-resume of CI-blocked tasks, other reasons untouched |
 | `router_ci_test.go` | the CI queue does not block work; cancel stops CI jobs |
 | `gh_test.go` | label transitions and GitHub helpers |
-| `release_test.go` | version tag parsing, bump rules, commit classification, due check (calendar days and configured time), time parsing/defaults, release request body, disabled/not-due/no-commit skips |
+| `release_test.go` | version tag parsing, bump rules, commit classification, due check (calendar days and configured time), slot wake-up time (vs. the hourly cap), time parsing/defaults, release request body, disabled/not-due/no-commit skips |
 | `main_test.go` | proxy/env parsing, repo normalization (names, objects, object arrays), mentions and commands, closable phases, state-dir adoption of `~/.gh-issue-killer`, legacy env fallbacks, the `autoReview` default and opt-out |
 | `prompts_test.go` | every embedded prompt loads and keeps its placeholders |
 | `triage_test.go` | mode normalization, plan/build routing, triage answer parsing, explicit plan requests, direct-build start |

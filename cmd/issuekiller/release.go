@@ -17,11 +17,14 @@ import (
 // whether the batch is a feature.
 
 const (
-	// releaseTick re-evaluates each repo's schedule; the config interval and
-	// time decide whether that tick may call GitHub. Hourly keeps the daemon's
-	// clock coarse: a scheduled time publishes on the first tick after it, so
-	// within an hour, without waking up per repository.
+	// releaseTick is the longest a release loop sleeps. The loop normally wakes
+	// at the configured time (see nextReleaseCheck); the hourly cap is the
+	// safety net for clock changes and keeps the pre-slot period cheap.
 	releaseTick = time.Hour
+	// releaseRetry is how long a loop waits after a failed check. The failure
+	// leaves the last-check timestamp untouched, so without a floor the slot
+	// would look due and the loop would hit GitHub in a tight loop.
+	releaseRetry = 15 * time.Minute
 	// releaseCommitLimit caps the first release of a repository, which has no
 	// previous tag to compare against.
 	releaseCommitLimit = 100
@@ -167,6 +170,35 @@ func releaseDue(lastCheck string, intervalDays int, at string, now time.Time) bo
 	return !now.Before(slot)
 }
 
+// nextReleaseCheck returns how long the loop may sleep before its next check.
+// The wake-up is the slot itself, so a 09:00 release publishes at 09:00
+// instead of at the next hourly tick. The result is capped at releaseTick and
+// floored at zero; the caller replaces zero with releaseRetry after a failure.
+func nextReleaseCheck(lastCheck string, intervalDays int, at string, now time.Time) time.Duration {
+	hour, minute, err := parseReleaseTime(at)
+	if err != nil {
+		hour, minute = 9, 0
+	}
+	if intervalDays < 1 {
+		intervalDays = 1
+	}
+	// Never checked: wait for today's slot; a startup after the slot is due
+	// immediately (releaseDue treats it the same way).
+	base, interval := now, 0
+	if checked, err := time.Parse(time.RFC3339, strings.TrimSpace(lastCheck)); err == nil {
+		base, interval = checked.In(now.Location()), intervalDays
+	}
+	slot := time.Date(base.Year(), base.Month(), base.Day()+interval, hour, minute, 0, 0, now.Location())
+	delay := slot.Sub(now)
+	if delay < 0 {
+		delay = 0
+	}
+	if delay > releaseTick {
+		delay = releaseTick
+	}
+	return delay
+}
+
 // parseReleaseTime reads the local publish time of day. Empty means the
 // default; H:MM is accepted so a hand-edited config does not fail over a
 // missing zero. Anything else is an error: a typo must not silently move a
@@ -285,10 +317,11 @@ func checkRelease(ctx context.Context, app *AppContext) error {
 	return nil
 }
 
-// startReleaseChecker runs one loop per opted-in repository. The repo is
-// checked at startup and then every releaseTick; each check is independent, so
-// a slow GitHub call in one repo does not delay the others and nothing touches
-// the poller or the job queues.
+// startReleaseChecker runs one loop per opted-in repository. Each loop checks
+// at startup and then sleeps until its own slot (nextReleaseCheck), so a 09:00
+// release is published at 09:00 rather than on the next hourly tick; the
+// checks stay independent, so a slow GitHub call in one repo does not delay the
+// others and nothing touches the poller or the job queues.
 func startReleaseChecker(ctx context.Context, contexts map[string]*AppContext, log *Logger) func() {
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
@@ -307,15 +340,25 @@ func startReleaseChecker(ctx context.Context, contexts map[string]*AppContext, l
 				}
 			}
 			check()
-			ticker := time.NewTicker(releaseTick)
-			defer ticker.Stop()
 			for {
+				cfg := app.Repo.Release
+				lastCheck := app.Store.Meta(name).LastReleaseCheckAt
+				delay := nextReleaseCheck(lastCheck, cfg.IntervalDays, cfg.Time, time.Now())
+				if delay <= 0 {
+					// The slot just passed but the timestamp did not move: the
+					// check failed (a success always records the time), or the
+					// clock jumped. Retry later instead of spinning on GitHub.
+					delay = releaseRetry
+				}
+				timer := time.NewTimer(delay)
 				select {
 				case <-stop:
+					timer.Stop()
 					return
 				case <-ctx.Done():
+					timer.Stop()
 					return
-				case <-ticker.C:
+				case <-timer.C:
 					check()
 				}
 			}
@@ -324,7 +367,7 @@ func startReleaseChecker(ctx context.Context, contexts map[string]*AppContext, l
 	if enabled == 0 {
 		log.Debug("release checks disabled (no repo sets release.enabled)")
 	} else {
-		log.Info("release checks started for %d repo(s), tick %s", enabled, releaseTick)
+		log.Info("release checks started for %d repo(s); each wakes at its release time", enabled)
 	}
 	return func() {
 		close(stop)

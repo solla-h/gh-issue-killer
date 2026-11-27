@@ -538,3 +538,63 @@ func releasePostBody(calls []apiCall) string {
 	}
 	return ""
 }
+
+// The loop sleeps until the slot, not until the next hourly boundary: a daemon
+// that started at 08:53 used to publish the 09:00 release at 09:53.
+func TestNextReleaseCheckWakesAtTheSlot(t *testing.T) {
+	local := func(day, hour, minute int) time.Time {
+		return time.Date(2026, 11, day, hour, minute, 0, 0, time.Local)
+	}
+	cases := []struct {
+		name  string
+		last  string
+		days  int
+		at    string
+		now   time.Time
+		delay time.Duration
+	}{
+		{
+			name: "never checked, slot ahead",
+			at:   "09:00", now: local(27, 8, 30),
+			delay: 30 * time.Minute,
+		},
+		{
+			name: "never checked, slot passed",
+			at:   "09:00", now: local(27, 9, 5),
+			delay: 0,
+		},
+		{
+			name: "checked yesterday, ten minutes to go",
+			last: local(26, 9, 0).Format(time.RFC3339), days: 1, at: "09:00",
+			now:   local(27, 8, 50),
+			delay: 10 * time.Minute,
+		},
+		{
+			name: "checked today, next slot is tomorrow",
+			last: local(27, 9, 0).Format(time.RFC3339), days: 1, at: "09:00",
+			now:   local(27, 9, 10),
+			delay: releaseTick,
+		},
+		{
+			name: "two-day interval stays capped",
+			last: local(26, 9, 0).Format(time.RFC3339), days: 2, at: "09:00",
+			now:   local(27, 8, 50),
+			delay: releaseTick,
+		},
+		{
+			name: "unusable time falls back to 09:00",
+			last: local(26, 9, 0).Format(time.RFC3339), days: 1, at: "noon",
+			now:   local(27, 8, 45),
+			delay: 15 * time.Minute,
+		},
+	}
+	for _, c := range cases {
+		got := nextReleaseCheck(c.last, c.days, c.at, c.now)
+		if got != c.delay {
+			t.Fatalf("%s: nextReleaseCheck = %s, want %s", c.name, got, c.delay)
+		}
+		if got > releaseTick {
+			t.Fatalf("%s: sleep %s exceeds the hourly safety cap", c.name, got)
+		}
+	}
+}
