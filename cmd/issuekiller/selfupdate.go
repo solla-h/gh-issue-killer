@@ -489,11 +489,6 @@ const (
 	masterSettle = 5 * time.Second
 )
 
-// watchMaster rebuilds the running binary from master whenever it moves. It is
-// the development counterpart of watchSelfUpdates and needs git, go and npm on
-// the machine, because the dashboard is compiled from frontend/ into the binary.
-// The returned channel fires once after a successful rebuild; the caller waits
-// for idle jobs and re-execs.
 // masterWatchBaseline is the commit the watcher compares against. A queued
 // restart can re-exec a binary that was built before master moved again (the
 // restart waits for running jobs); seeding the watch from the remote head in
@@ -506,44 +501,61 @@ func masterWatchBaseline(head, buildCommit string) string {
 	return buildCommit
 }
 
+// watchMaster rebuilds the running binary from master whenever it moves. It is
+// the development counterpart of watchSelfUpdates and needs git, go and npm on
+// the machine, because the dashboard is compiled from frontend/ into the binary.
+// The returned channel fires once after a successful rebuild; the caller waits
+// for idle jobs and re-execs.
 func watchMaster(ctx context.Context, log *Logger, env func() []string) <-chan struct{} {
+	return watchMasterLoop(ctx, log, env, masterCheck, masterSettle, remoteMasterHead, rebuildFromMaster)
+}
+
+// watchMasterLoop is watchMaster with the interval, settle delay, head read and
+// rebuild injected, so the retry path can be tested without git and a 30 s wait.
+func watchMasterLoop(ctx context.Context, log *Logger, env func() []string, every, settle time.Duration,
+	head func(context.Context, func() []string) string,
+	rebuild func(context.Context, *Logger, func() []string, string) error) <-chan struct{} {
 	ready := make(chan struct{}, 1)
 	go func() {
-		head := remoteMasterHead(ctx, env)
-		if head == "" {
-			log.Warn("master update: cannot read %s from %s; disabled", masterBranch, masterRepoURL)
-			return
-		}
-		last := masterWatchBaseline(head, commit)
-		log.Debug("master update: watching %s at %s", masterBranch, shortSHA(head))
-		ticker := time.NewTicker(masterCheck)
+		ticker := time.NewTicker(every)
 		defer ticker.Stop()
+		var last string
+		seeded, warned := false, false
 		for {
+			// An empty head is a failed read (an expired token at that instant, a
+			// proxy hiccup), not a reason to disable the watcher for the daemon's
+			// lifetime: keep the baseline and retry on the next tick.
+			if next := head(ctx, env); next != "" {
+				if !seeded {
+					last = masterWatchBaseline(next, commit)
+					seeded = true
+					log.Debug("master update: watching %s at %s", masterBranch, shortSHA(last))
+				} else if next != last {
+					time.Sleep(settle)
+					if settled := head(ctx, env); settled != "" {
+						next = settled
+					}
+					log.Info("master update: new %s commit %s; rebuilding", masterBranch, shortSHA(next))
+					last = next
+					if err := rebuild(ctx, log, env, next); err != nil {
+						log.Error("master update: %v (keeping the running binary)", err)
+					} else {
+						select {
+						case ready <- struct{}{}:
+						default:
+						}
+						return
+					}
+				}
+			} else if !seeded && !warned {
+				log.Warn("master update: cannot read %s from %s yet; retrying every %s", masterBranch, masterRepoURL, every)
+				warned = true
+			}
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
 			}
-			next := remoteMasterHead(ctx, env)
-			if next == "" || next == last {
-				continue
-			}
-			time.Sleep(masterSettle)
-			if settled := remoteMasterHead(ctx, env); settled != "" {
-				next = settled
-			}
-			log.Info("master update: new %s commit %s; rebuilding", masterBranch, shortSHA(next))
-			if err := rebuildFromMaster(ctx, log, env, next); err != nil {
-				log.Error("master update: %v (keeping the running binary)", err)
-				last = next
-				continue
-			}
-			last = next
-			select {
-			case ready <- struct{}{}:
-			default:
-			}
-			return
 		}
 	}()
 	return ready

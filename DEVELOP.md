@@ -106,9 +106,10 @@ Only the daemon writes `state.json`; the web UI and CLIs read it. Treat
 4. `NewGH`: resolves the credential in `GH_AGENT_TOKEN` → `~/.issuekiller/token`
    → the old `gh-agent` `hosts.yml` (read-only compatibility), refreshes it when
    it is close to expiry, and verifies the identity (never the human account).
-5. For each repo: `GetRepo`, `resolveRepo` (managed clone under `repos/`),
-   `EnsureLabels`, build the child env (proxy + `GH_TOKEN`/`GITHUB_TOKEN` so the
-   agent's own `gh` calls use the bot).
+5. For each repo: `GetRepo`, `resolveRepo` (managed clone under `repos/`) with a
+   live token factory (`GH.currentToken`) and the refresh hook, then
+   `EnsureLabels`. No child environment is built at startup: `AppContext.Env()`
+   rebuilds it (proxy + live `GH_TOKEN`/`GITHUB_TOKEN`) on every use.
 6. `LoadStore`, `NewRouter` (queues + worker goroutines), optional web server.
 7. `router.StartupScan`: resumes interrupted work, applies pending closes,
    and picks up issues that already mention the agent.
@@ -492,15 +493,19 @@ are unavailable the poller is the fallback; both funnel into `Router.Handle*`.
   cancel.
 - Commits use the bot identity (`<id>+<login>@users.noreply.github.com`).
 - Pushes use a one-shot `http.extraheader` with the live token, rebuilt for each
-  git operation and child process; nothing is written to any gitconfig. Each
-  authenticated git command captures the token embedded in its first
-  environment and passes that exact value to `GH.refreshAfterUnauthorized` on a
-  401, avoiding a redundant refresh when another goroutine already rotated it.
-  If refresh errors after a concurrent rotation, the command still retries once
-  with the live token. The worktree-ahead check also retries its branch fetch on
-  auth failure and reports fetch errors instead of treating them as “not ahead”.
-  The `followMaster` watcher (§16) takes the same kind of factory, so its
-  `ls-remote` and clone also follow a rotation.
+  git operation and for each child process when it is started, so a rotated token
+  reaches the next daemon git command; nothing is written to any gitconfig. A
+  child process keeps the snapshot it was started with: an agent whose `gh` or
+  `git push` outlives a rotation still sees the old token (implement runs can
+  last `ImplementTimeout`), and only the daemon's own git operations follow the
+  rotation. Each authenticated git command captures the token embedded in its
+  first environment and passes that exact value to `GH.refreshAfterUnauthorized`
+  on a 401, avoiding a redundant refresh when another goroutine already rotated
+  it. If refresh errors after a concurrent rotation, the command still retries
+  once with the live token. The worktree-ahead check also retries its branch
+  fetch on auth failure and reports fetch errors instead of treating them as
+  “not ahead”. The `followMaster` watcher (§16) takes the same kind of factory,
+  so its `ls-remote` and clone also follow a rotation.
 - `plan` uses a temporary detached worktree under `tmp/`.
 
 ## 13. Coding agents (`runner.go`)
@@ -703,10 +708,13 @@ updates: it polls `master` every 30 s, rebuilds in a dedicated clone under
 and fires a restart; it takes precedence over `selfUpdate`. It receives an
 environment factory (`AppContext.Env`) rather than one startup slice, so the
 `ls-remote` poll and the clone/build follow a rotated bot token like job git
-operations do. The watch baseline
-is the injected `main.commit`, not the remote head: a restart queued behind a
-long job re-execs whichever binary was built earlier, and seeding from the head
-would silently leave it one commit behind until the next push. The
+operations do. A failed first poll (an expired token at that instant, a proxy
+hiccup) does not disable the watcher: it warns once and retries on the next
+tick, so one bad read cannot switch `followMaster` off for the daemon's
+lifetime. The watch baseline is the injected `main.commit`, not the remote head:
+a restart queued behind a long job re-execs whichever binary was built earlier,
+and seeding from the head would silently leave it one commit behind until the
+next push. The
 dashboard's PUT reuses the same loader and triggers the same reload, as do
 `/api/restart` and a finished update. Both end in `reexec`, so the pid and the
 lock stay valid; interrupted implementations resume from their worktree on the
@@ -782,7 +790,7 @@ keeps tests quiet. Notable coverage:
 | `oauth_test.go` | Device Flow pending/slow_down/expired, token file 0600, refresh success/failure, credential precedence, 401 retry, login/paste endpoints, login panel markup |
 | `openurl_test.go` | per-platform browser command, no shell, injected runner |
 | `webconfig_test.go` | `/api/config` validation/round-trip/origin check, `release` defaults and rejection, `/api/detect` degradation, `/api/update` payload, snapshot without a router |
-| `selfupdate_test.go` | version ordering, asset selection, mirror/digest parsing, archive extraction, checksum mismatch keeps the binary |
+| `selfupdate_test.go` | version ordering, asset selection, mirror/digest parsing, archive extraction, checksum mismatch keeps the binary, `followMaster` keeps polling after a failed first read |
 | `wizard_test.go` | `-init` setup wizard flows |
 | `logs_test.go`, `logging_test.go` | log rotation, follower, daemonize helpers |
 

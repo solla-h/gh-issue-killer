@@ -1344,6 +1344,9 @@ func doImplement(ctx context.Context, app *AppContext, trigger Trigger, issue Is
 		blockIssue(ctx, app, number, err)
 		return
 	}
+	// Env is a snapshot taken when the agent starts: an implement run can last
+	// ImplementTimeout, so a rotation during it is not seen by the agent's own
+	// gh/git calls — only the daemon's git operations rebuild per use (§12).
 	result, err := runner.Run(ctx, RunnerOptions{
 		Cwd:     worktree,
 		Prompt:  prompt,

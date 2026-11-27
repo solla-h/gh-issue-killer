@@ -15,7 +15,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestCompareVersions(t *testing.T) {
@@ -327,5 +329,51 @@ func TestMasterWatchBaselineUsesBuildCommit(t *testing.T) {
 		if got := masterWatchBaseline(c.head, c.build); got != c.want {
 			t.Fatalf("masterWatchBaseline(%q, %q) = %q, want %q", c.head, c.build, got, c.want)
 		}
+	}
+}
+
+// A transient failure of the first ls-remote (an expired token at that instant,
+// a proxy hiccup) must not disable followMaster for the daemon's lifetime: the
+// watcher keeps polling and starts watching once a head arrives.
+func TestWatchMasterRetriesAfterFailedFirstRead(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var mu sync.Mutex
+	heads := []string{"", "", "aaa", "bbb"}
+	reads := 0
+	head := func(context.Context, func() []string) string {
+		mu.Lock()
+		defer mu.Unlock()
+		value := heads[len(heads)-1]
+		if reads < len(heads) {
+			value = heads[reads]
+			reads++
+		}
+		return value
+	}
+	rebuilt := make(chan string, 1)
+	rebuild := func(_ context.Context, _ *Logger, _ func() []string, head string) error {
+		rebuilt <- head
+		return nil
+	}
+
+	ready := watchMasterLoop(ctx, NewSilentLogger(), func() []string { return nil }, time.Millisecond, 0, head, rebuild)
+
+	select {
+	case <-ready:
+	case <-time.After(5 * time.Second):
+		mu.Lock()
+		n := reads
+		mu.Unlock()
+		t.Fatalf("watcher did not rebuild after a failed first read (reads=%d)", n)
+	}
+	select {
+	case got := <-rebuilt:
+		if got != "bbb" {
+			t.Fatalf("rebuilt %q, want bbb", got)
+		}
+	default:
+		t.Fatal("ready fired without a rebuild")
 	}
 }
