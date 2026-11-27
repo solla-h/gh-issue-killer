@@ -114,9 +114,10 @@ mirror, board port) and the updates tab shows the daemon's version, pid,
 identity, transport and config path. Any per-project field left on "follow
 global" keeps the override out of the config file. A separate **Projects** page
 (the 看板/项目 switch in the header, `/projects`) lists every watched repository
-with the bot account's role on it, adds or removes a project, and flags the
-repositories where the bot lacks Write (no PRs) or Admin (no webhook), with a
-direct link to the repository's collaborator settings. Add and remove keep the
+instantly and checks the bot account's role in the background, adds or removes
+a project, and flags the repositories where the bot lacks Write (no PRs) or
+Admin (no webhook), with a direct link to the repository's collaborator
+settings. Add and remove keep the
 config file's existing shape, validate it like the settings save, and restart
 the daemon.
 The board is a

@@ -170,7 +170,7 @@ dependencies.
 | `webauth.go` | dashboard login endpoints: Device Flow start/poll and pasted-token fallback |
 | `openurl.go` | opens an external http(s) link in the platform browser (`open`/`xdg-open`/`rundll32`) |
 | `webconfig.go` | settings API: `/api/config`, `/api/detect`, `/api/restart`, `/api/update` |
-| `webprojects.go` | projects API: `/api/projects` lists the watched repos with the bot account's role (`admin`/`write`/`triage`/`read`/`none`) and webhook state; POST adds or removes one repo, keeping the config's array/keyed shape and validating it through `loadConfig` |
+| `webprojects.go` | projects API: `/api/projects` lists the watched repos from the config alone (no GitHub calls), `/api/projects/access` fills in the bot account's role (`admin`/`write`/`triage`/`read`/`none`) and webhook capability, POST adds or removes one repo, keeping the config's array/keyed shape and validating it through `loadConfig` |
 | `messages.go` | scaffolding text (headings, hints, footers) in Chinese/English, `app.text`, language detection |
 | `util.go` | paths (state-dir adoption, `envValue` for renamed variables), logger, atomic writes, `tailString`, small helpers |
 | `prompts/*.md` | stage prompts (embedded via `prompts/embed.go`) |
@@ -762,10 +762,15 @@ overrides something (helpers in `$lib/repos.ts`).
 
 The projects page (`/projects`, the board/projects switch in the masthead) is the dedicated place to
 add or remove a repository and to see whether the bot account can actually work
-in it. `GET /api/projects` asks GitHub for the token's role per repo
-(`admin`/`write`/`triage`/`read`/`none`) plus whether it may manage hooks, and
-the page explains the gap: without Write the bot cannot push branches or open
-PRs, without Admin it cannot create its own webhook (an externally managed one
+in it. The page renders twice: `GET /api/projects` answers from the config and
+state alone, and `GET /api/projects/access` then asks GitHub for the token's
+role per repo (`admin`/`write`/`triage`/`read`/`none`) plus whether it may
+manage hooks, so the list is usable while the badges say “checking…”. The two
+requests exist because the role check costs two GitHub calls per repo: nine
+projects behind a proxy made the combined request take eight seconds. The
+access check runs four repos at a time and keeps the config order. The page
+explains the gap: without Write the bot cannot push branches or open PRs,
+without Admin it cannot create its own webhook (an externally managed one
 still streams). Missing access gets a guidance block with a button to the
 repository's `settings/access` page and the bot login, so the main account knows
 exactly whom to invite and with which role. Add verifies the repo is visible to

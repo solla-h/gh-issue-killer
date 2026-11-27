@@ -71,6 +71,14 @@ export async function getProjects() {
 	return response.json();
 }
 
+// Separate from the list on purpose: the role check costs two GitHub requests
+// per repository, so the page renders the list first and fills these in.
+export async function getProjectAccess() {
+	const response = await fetch('/api/projects/access', { cache: 'no-store' });
+	if (!response.ok) throw new Error(await errorMessage(response));
+	return response.json();
+}
+
 export async function postProject(action: 'add' | 'remove', repo: string) {
 	const response = await fetch('/api/projects', {
 		method: 'POST',

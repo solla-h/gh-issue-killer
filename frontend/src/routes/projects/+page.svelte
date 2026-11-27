@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import ExternalLink from '@lucide/svelte/icons/external-link';
 	import FolderGit from '@lucide/svelte/icons/folder-git';
+	import LoaderCircle from '@lucide/svelte/icons/loader-circle';
 	import Plus from '@lucide/svelte/icons/plus';
 	import RefreshCw from '@lucide/svelte/icons/refresh-cw';
 	import ShieldAlert from '@lucide/svelte/icons/shield-alert';
@@ -9,28 +10,37 @@
 	import ShieldX from '@lucide/svelte/icons/shield-x';
 	import Trash2 from '@lucide/svelte/icons/trash-2';
 	import Webhook from '@lucide/svelte/icons/webhook';
-	import { getProjects, openExternal, postProject } from '#lib/api.ts';
+	import { getProjectAccess, getProjects, openExternal, postProject } from '#lib/api.ts';
 	import { dashboard } from '#lib/dashboard.svelte.ts';
 	import { showModalDialog } from '#lib/dialog.ts';
 	import { t } from '#lib/i18n.svelte.ts';
-	import type { ProjectInfo, ProjectPermission, ProjectsPayload } from '#lib/types.ts';
+	import type {
+		ProjectAccess,
+		ProjectInfo,
+		ProjectPermission,
+		ProjectsPayload
+	} from '#lib/types.ts';
 	import { cn, humanAge } from '#lib/utils.ts';
 	import Button from '#lib/components/ui/button.svelte';
 	import Input from '#lib/components/ui/input.svelte';
 	import Masthead from '#lib/components/masthead.svelte';
 	import SettingsPanel from '#lib/components/settings-panel.svelte';
 
-	// The project list is the only screen that edits config.repos (add/remove);
-	// per-repo options stay in the settings dialog. Every write makes the daemon
-	// restart, so the page re-fetches until the new process answers again.
+	// The list comes from the config and renders immediately; the role check
+	// costs two GitHub requests per repository, so it runs as a second request
+	// and fills the badges in place. Waiting for both made the page take eight
+	// seconds with nine projects behind a proxy.
 
 	const ACCESS_DOCS =
 		'https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/managing-repository-settings/managing-teams-and-people-with-access-to-your-repository';
 
 	let payload = $state<ProjectsPayload | null>(null);
+	let access = $state<Record<string, ProjectAccess>>({});
 	let loading = $state(true);
+	let checking = $state(false);
 	let busy = $state('');
 	let error = $state('');
+	let accessError = $state('');
 	let notice = $state('');
 
 	let addDialog = $state<HTMLDialogElement | null>(null);
@@ -43,8 +53,10 @@
 	let removeTarget = $state<ProjectInfo | null>(null);
 
 	let repos = $derived(payload?.repos ?? []);
-	let needAccess = $derived(repos.filter((repo) => !repo.canPush));
-	let accessChecked = $derived(repos.length > 0 && repos.every((repo) => repo.permission !== 'unknown'));
+	let rows = $derived(repos.map((repo) => ({ repo, access: access[repo.name] })));
+	let needAccess = $derived(rows.filter((row) => row.access && !row.access.canPush));
+	let allGood = $derived(rows.length > 0 && rows.every((row) => row.access?.canPush));
+	let pending = $derived(rows.filter((row) => !row.access));
 
 	function message(err: unknown): string {
 		return err instanceof Error ? err.message : String(err);
@@ -103,11 +115,31 @@
 		loading = true;
 		try {
 			payload = (await getProjects()) as ProjectsPayload;
-			error = payload.error ?? '';
+			error = '';
+			// A reload (after a restart) re-checks the roles for exactly these
+			// projects; stale entries for removed ones must not leak in.
+			access = {};
 		} catch (err) {
 			error = t('projects.checkFailed', { msg: message(err) });
 		} finally {
 			loading = false;
+		}
+		if (payload) void checkAccess();
+	}
+
+	async function checkAccess(): Promise<void> {
+		checking = true;
+		accessError = '';
+		try {
+			const data = await getProjectAccess();
+			const next: Record<string, ProjectAccess> = {};
+			for (const item of data.repos as ProjectAccess[]) next[item.name] = item;
+			access = next;
+			accessError = data.error ?? '';
+		} catch (err) {
+			accessError = t('projects.checkFailed', { msg: message(err) });
+		} finally {
+			checking = false;
 		}
 	}
 
@@ -120,8 +152,9 @@
 			await new Promise((resolve) => setTimeout(resolve, 1000));
 			try {
 				payload = (await getProjects()) as ProjectsPayload;
-				error = payload.error ?? '';
+				error = '';
 				busy = '';
+				void checkAccess();
 				return;
 			} catch {
 				/* still restarting */
@@ -203,7 +236,10 @@
 					onclick={() => void load()}
 					data-testid="projects-refresh"
 				>
-					<RefreshCw class={cn('size-4', loading && 'animate-spin')} aria-hidden="true" />
+					<RefreshCw
+						class={cn('size-4', (loading || checking) && 'animate-spin')}
+						aria-hidden="true"
+					/>
 					{t('projects.refresh')}
 				</Button>
 				<Button
@@ -227,14 +263,17 @@
 				</span>
 			{/if}
 			<span>{t('projects.count', { n: repos.length })}</span>
+			{#if checking}
+				<span class="flex items-center gap-1" data-testid="projects-checking">
+					<LoaderCircle class="size-3 animate-spin" aria-hidden="true" />
+					{t('projects.checkingShort')}
+				</span>
+			{/if}
 			<span class="font-mono break-all">{payload?.config ?? ''}</span>
 		</div>
 
 		<p
-			class={cn(
-				'text-sm',
-				notice ? 'mb-3 text-phase-done' : 'sr-only'
-			)}
+			class={cn('text-sm', notice ? 'mb-3 text-phase-done' : 'sr-only')}
 			role="status"
 			aria-live="polite"
 			data-testid="projects-notice"
@@ -278,15 +317,15 @@
 						{t('projects.guide.body', { bot: payload?.bot ?? 'bot' })}
 					</p>
 					<ul class="mt-2 flex flex-wrap items-center gap-2">
-						{#each needAccess as repo (repo.name)}
+						{#each needAccess as row (row.repo.name)}
 							<li>
 								<button
 									type="button"
 									class="chip h-8 gap-1.5 text-xs"
-									onclick={() => openExternal(repo.accessUrl)}
+									onclick={() => openExternal(row.repo.accessUrl)}
 								>
 									<ExternalLink class="size-3.5" aria-hidden="true" />
-									{t('projects.guide.open')} · {repo.name}
+									{t('projects.guide.open')} · {row.repo.name}
 								</button>
 							</li>
 						{/each}
@@ -301,7 +340,7 @@
 						</li>
 					</ul>
 				</section>
-			{:else if accessChecked}
+			{:else if allGood}
 				<p
 					class="mb-4 flex items-center gap-2 rounded-lg border border-phase-done/30 bg-phase-done/5 px-3 py-2 text-sm"
 					data-testid="projects-guide-ok"
@@ -311,31 +350,54 @@
 				</p>
 			{/if}
 
+			{#if accessError}
+				<p
+					class="mb-3 flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive"
+					role="alert"
+					data-testid="projects-access-error"
+				>
+					<ShieldX class="mt-0.5 size-4 flex-none" aria-hidden="true" />
+					<span>{accessError}</span>
+				</p>
+			{/if}
+
 			<ul class="flex flex-col gap-2" data-testid="projects-list">
-				{#each repos as repo (repo.name)}
+				{#each rows as row (row.repo.name)}
+					{@const repo = row.repo}
+					{@const checked = row.access}
 					<li class="card px-4 py-3" data-testid="project-row" data-repo={repo.name}>
 						<div class="flex flex-wrap items-center gap-x-3 gap-y-2">
 							<h3 class="flex min-w-0 items-center gap-2 font-mono text-sm font-semibold">
 								<FolderGit class="size-4 flex-none text-muted-foreground" aria-hidden="true" />
 								<span class="break-words">{repo.name}</span>
 							</h3>
-							<span
-								class={cn(
-									'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-semibold',
-									repo.canPush
-										? 'border-phase-done/40 bg-phase-done/10 text-phase-done'
-										: 'border-phase-blocked/40 bg-phase-blocked/10 text-phase-blocked'
-								)}
-								data-testid="project-permission"
-								title={repo.canPush ? undefined : permissionWhy(repo.permission)}
-							>
-								{#if repo.canPush}
-									<ShieldCheck class="size-3.5" aria-hidden="true" />
-								{:else}
-									<ShieldAlert class="size-3.5" aria-hidden="true" />
-								{/if}
-								{t('projects.col.permission')} · {permissionLabel(repo.permission)}
-							</span>
+							{#if checked}
+								<span
+									class={cn(
+										'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-semibold',
+										checked.canPush
+											? 'border-phase-done/40 bg-phase-done/10 text-phase-done'
+											: 'border-phase-blocked/40 bg-phase-blocked/10 text-phase-blocked'
+									)}
+									data-testid="project-permission"
+									title={checked.canPush ? undefined : permissionWhy(checked.permission)}
+								>
+									{#if checked.canPush}
+										<ShieldCheck class="size-3.5" aria-hidden="true" />
+									{:else}
+										<ShieldAlert class="size-3.5" aria-hidden="true" />
+									{/if}
+									{t('projects.col.permission')} · {permissionLabel(checked.permission)}
+								</span>
+							{:else}
+								<span
+									class="inline-flex items-center gap-1.5 rounded-full border border-border bg-muted/40 px-2.5 py-0.5 text-xs font-medium text-muted-foreground"
+									data-testid="project-checking"
+								>
+									<LoaderCircle class="size-3.5 animate-spin" aria-hidden="true" />
+									{t('projects.checking')}
+								</span>
+							{/if}
 							<Button
 								variant="destructive"
 								size="sm"
@@ -381,11 +443,11 @@
 							</div>
 						</dl>
 
-						{#if !repo.canPush}
+						{#if checked && !checked.canPush}
 							<p class="mt-2 text-xs text-phase-blocked" data-testid="project-permission-why">
-								{permissionWhy(repo.permission)}
-								{#if repo.checkError}
-									<span class="text-muted-foreground"> — {repo.checkError}</span>
+								{permissionWhy(checked.permission)}
+								{#if checked.error}
+									<span class="text-muted-foreground"> — {checked.error}</span>
 								{/if}
 								<button
 									type="button"
@@ -399,6 +461,9 @@
 					</li>
 				{/each}
 			</ul>
+			{#if pending.length > 0 && !checking && accessError}
+				<p class="mt-3 text-xs text-muted-foreground">{t('projects.accessUnavailable')}</p>
+			{/if}
 		{/if}
 	</main>
 </div>

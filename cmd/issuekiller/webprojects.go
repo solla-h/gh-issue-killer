@@ -15,25 +15,21 @@ import (
 // only touches membership, so the two editors never disagree about the shape
 // of the document.
 
-// webProject is one row of the projects page.
+// webProject is one row of the projects page. It carries only what the daemon
+// already knows, so GET /api/projects answers without touching GitHub and the
+// page renders immediately; the role check is a second, slower request
+// (GET /api/projects/access) that fills the badges in place.
 type webProject struct {
-	Name       string   `json:"name"`
-	Base       string   `json:"base"`
-	Agent      string   `json:"agent"`
-	Model      string   `json:"model"`
-	Mode       string   `json:"mode"`
-	Approvers  []string `json:"approvers"`
-	Permission string   `json:"permission"`
-	// CanPush and CanAdmin mirror the role so the UI can explain exactly which
-	// capability is missing instead of a single "no access".
-	CanPush      bool   `json:"canPush"`
-	CanAdmin     bool   `json:"canAdmin"`
-	WebhookReady bool   `json:"webhookReady"`
-	HookID       int64  `json:"hookId"`
-	Smee         string `json:"smee"`
-	LastPoll     string `json:"lastPoll"`
-	AccessURL    string `json:"accessUrl"`
-	CheckError   string `json:"checkError,omitempty"`
+	Name      string   `json:"name"`
+	Base      string   `json:"base"`
+	Agent     string   `json:"agent"`
+	Model     string   `json:"model"`
+	Mode      string   `json:"mode"`
+	Approvers []string `json:"approvers"`
+	HookID    int64    `json:"hookId"`
+	Smee      string   `json:"smee"`
+	LastPoll  string   `json:"lastPoll"`
+	AccessURL string   `json:"accessUrl"`
 }
 
 type projectsPayload struct {
@@ -43,7 +39,21 @@ type projectsPayload struct {
 	Config  string       `json:"config"`
 	Webhook bool         `json:"webhook"`
 	Repos   []webProject `json:"repos"`
-	Error   string       `json:"error,omitempty"`
+}
+
+// projectAccess is the role check for one repository.
+type projectAccess struct {
+	Name         string `json:"name"`
+	Permission   string `json:"permission"`
+	CanPush      bool   `json:"canPush"`
+	CanAdmin     bool   `json:"canAdmin"`
+	WebhookReady bool   `json:"webhookReady"`
+	Error        string `json:"error,omitempty"`
+}
+
+type projectsAccessPayload struct {
+	Repos []projectAccess `json:"repos"`
+	Error string          `json:"error,omitempty"`
 }
 
 func (w *webServer) handleProjects(rw http.ResponseWriter, req *http.Request) {
@@ -58,27 +68,48 @@ func (w *webServer) handleProjects(rw http.ResponseWriter, req *http.Request) {
 	}
 }
 
+// handleProjectsAccess checks the bot's role per repository. It is separate
+// from the list because it costs two GitHub requests per repo (eight seconds
+// through a proxy for nine repos), and the page must not wait for it.
+func (w *webServer) handleProjectsAccess(rw http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		rw.Header().Set("Allow", "GET")
+		w.writeJSON(rw, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "GET required"})
+		return
+	}
+	payload := projectsAccessPayload{Repos: make([]projectAccess, 0, len(w.cfg.Repos))}
+	names := make([]string, 0, len(w.cfg.Repos))
+	for _, repo := range w.cfg.Repos {
+		names = append(names, repo.FullName)
+	}
+	results, err := w.checkRepoAccess(names)
+	if err != nil {
+		payload.Error = err.Error()
+	}
+	access := map[string]repoAccessInfo{}
+	for _, result := range results {
+		access[result.Repo] = result
+	}
+	for _, name := range names {
+		info := access[name]
+		payload.Repos = append(payload.Repos, projectAccess{
+			Name:         name,
+			Permission:   firstNonEmpty(info.Permission, "unknown"),
+			CanPush:      info.Permission == "admin" || info.Permission == "write",
+			CanAdmin:     info.Permission == "admin",
+			WebhookReady: info.WebhookReady,
+			Error:        info.Err,
+		})
+	}
+	w.writeJSON(rw, http.StatusOK, payload)
+}
+
 func (w *webServer) projectsPayload() projectsPayload {
 	payload := projectsPayload{
 		Bot:     w.identity,
 		Config:  w.cfg.File,
 		Webhook: w.cfg.Webhook,
 		Repos:   make([]webProject, 0, len(w.cfg.Repos)),
-	}
-	names := make([]string, 0, len(w.cfg.Repos))
-	for _, repo := range w.cfg.Repos {
-		names = append(names, repo.FullName)
-	}
-	access := map[string]repoAccessInfo{}
-	if len(names) > 0 {
-		results, err := w.checkRepoAccess(names)
-		if err != nil {
-			payload.Error = err.Error()
-		} else {
-			for _, result := range results {
-				access[result.Repo] = result
-			}
-		}
 	}
 	for _, repo := range w.cfg.Repos {
 		meta := w.store.Meta(repo.FullName)
@@ -88,23 +119,17 @@ func (w *webServer) projectsPayload() projectsPayload {
 				base = app.Local.Base
 			}
 		}
-		info := access[repo.FullName]
 		payload.Repos = append(payload.Repos, webProject{
-			Name:         repo.FullName,
-			Base:         base,
-			Agent:        repo.CodingAgent,
-			Model:        repo.Model,
-			Mode:         repo.Mode,
-			Approvers:    repo.Approvers,
-			Permission:   firstNonEmpty(info.Permission, "unknown"),
-			CanPush:      info.Permission == "admin" || info.Permission == "write",
-			CanAdmin:     info.Permission == "admin",
-			WebhookReady: info.WebhookReady,
-			HookID:       meta.HookID,
-			Smee:         meta.SmeeChannel,
-			LastPoll:     meta.LastPollAt,
-			AccessURL:    "https://github.com/" + repo.FullName + "/settings/access",
-			CheckError:   info.Err,
+			Name:      repo.FullName,
+			Base:      base,
+			Agent:     repo.CodingAgent,
+			Model:     repo.Model,
+			Mode:      repo.Mode,
+			Approvers: repo.Approvers,
+			HookID:    meta.HookID,
+			Smee:      meta.SmeeChannel,
+			LastPoll:  meta.LastPollAt,
+			AccessURL: "https://github.com/" + repo.FullName + "/settings/access",
 		})
 	}
 	return payload

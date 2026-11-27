@@ -164,6 +164,7 @@ export interface UpdatePayload {
 
 export type ProjectPermission = 'admin' | 'write' | 'triage' | 'read' | 'none' | 'unknown';
 
+/** One row of the projects list: what the daemon knows without asking GitHub. */
 export interface ProjectInfo {
 	name: string;
 	base: string;
@@ -171,15 +172,10 @@ export interface ProjectInfo {
 	model: string;
 	mode: string;
 	approvers: string[];
-	permission: ProjectPermission;
-	canPush: boolean;
-	canAdmin: boolean;
-	webhookReady: boolean;
 	hookId: number;
 	smee: string;
 	lastPoll: string;
 	accessUrl: string;
-	checkError?: string;
 }
 
 export interface ProjectsPayload {
@@ -187,5 +183,19 @@ export interface ProjectsPayload {
 	config: string;
 	webhook: boolean;
 	repos: ProjectInfo[];
+}
+
+/** The bot's role on one repository; filled in after the list has rendered. */
+export interface ProjectAccess {
+	name: string;
+	permission: ProjectPermission;
+	canPush: boolean;
+	canAdmin: boolean;
+	webhookReady: boolean;
+	error?: string;
+}
+
+export interface ProjectsAccessPayload {
+	repos: ProjectAccess[];
 	error?: string;
 }

@@ -192,10 +192,14 @@ func TestWebProjectsRejectsCrossOrigin(t *testing.T) {
 	}
 }
 
-func TestWebProjectsPayloadReportsMissingPush(t *testing.T) {
+// The list must answer from the config alone: the page renders it before the
+// role check, and nine repos with a slow proxy made the combined request take
+// eight seconds.
+func TestWebProjectsListDoesNotCheckGitHub(t *testing.T) {
 	web, _ := newProjectsTestWeb(t, `{"repos":["a/b"],"codingAgent":"opencode"}`)
-	web.repoAccess = func(_ *Proxy, repos []string) ([]repoAccessInfo, error) {
-		return []repoAccessInfo{{Repo: repos[0], Permission: "read", WebhookReady: false}}, nil
+	web.repoAccess = func(_ *Proxy, _ []string) ([]repoAccessInfo, error) {
+		t.Fatal("GET /api/projects must not call GitHub")
+		return nil, nil
 	}
 	recorder := httptest.NewRecorder()
 	web.handleProjects(recorder, httptest.NewRequest(http.MethodGet, "/api/projects", nil))
@@ -209,11 +213,52 @@ func TestWebProjectsPayloadReportsMissingPush(t *testing.T) {
 	if payload.Bot != "bot" || len(payload.Repos) != 1 {
 		t.Fatalf("payload = %+v", payload)
 	}
-	repo := payload.Repos[0]
-	if repo.Permission != "read" || repo.CanPush || repo.CanAdmin {
-		t.Fatalf("repo = %+v", repo)
-	}
-	if !strings.HasSuffix(repo.AccessURL, "/a/b/settings/access") {
+	if repo := payload.Repos[0]; !strings.HasSuffix(repo.AccessURL, "/a/b/settings/access") {
 		t.Fatalf("access URL = %q", repo.AccessURL)
+	}
+}
+
+func TestWebProjectsAccessReportsMissingPush(t *testing.T) {
+	web, _ := newProjectsTestWeb(t, `{"repos":["a/b"],"codingAgent":"opencode"}`)
+	web.repoAccess = func(_ *Proxy, repos []string) ([]repoAccessInfo, error) {
+		return []repoAccessInfo{{Repo: repos[0], Permission: "read", WebhookReady: false}}, nil
+	}
+	recorder := httptest.NewRecorder()
+	web.handleProjectsAccess(recorder, httptest.NewRequest(http.MethodGet, "/api/projects/access", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d", recorder.Code)
+	}
+	var payload projectsAccessPayload
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Repos) != 1 {
+		t.Fatalf("payload = %+v", payload)
+	}
+	repo := payload.Repos[0]
+	if repo.Name != "a/b" || repo.Permission != "read" || repo.CanPush || repo.CanAdmin {
+		t.Fatalf("access = %+v", repo)
+	}
+}
+
+func TestWebProjectsAccessKeepsPartialResults(t *testing.T) {
+	web, _ := newProjectsTestWeb(t, `{"repos":["a/b","c/d"],"codingAgent":"opencode"}`)
+	web.repoAccess = func(_ *Proxy, repos []string) ([]repoAccessInfo, error) {
+		return []repoAccessInfo{
+			{Repo: repos[0], Permission: "none", Err: "GET /repos/a/b -> 404"},
+			{Repo: repos[1], Permission: "admin", WebhookReady: true},
+		}, nil
+	}
+	recorder := httptest.NewRecorder()
+	web.handleProjectsAccess(recorder, httptest.NewRequest(http.MethodGet, "/api/projects/access", nil))
+	var payload projectsAccessPayload
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Repos) != 2 {
+		t.Fatalf("a failed repo must not hide the others: %+v", payload)
+	}
+	if payload.Repos[0].Error == "" || !payload.Repos[1].CanAdmin {
+		t.Fatalf("repos = %+v", payload.Repos)
 	}
 }

@@ -174,6 +174,7 @@ func startWeb(cfg *Config, router *Router, store *Store, log *Logger, opts webOp
 	mux.HandleFunc("/api/open-url", web.handleOpenURL)
 	mux.HandleFunc("/api/config", web.handleConfig)
 	mux.HandleFunc("/api/projects", web.handleProjects)
+	mux.HandleFunc("/api/projects/access", web.handleProjectsAccess)
 	mux.HandleFunc("/api/auth", web.handleAuth)
 	mux.HandleFunc("/api/auth/device", web.handleAuthDevice)
 	mux.HandleFunc("/api/auth/token", web.handleAuthToken)
