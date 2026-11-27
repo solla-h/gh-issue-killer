@@ -63,6 +63,12 @@ func TestVersionFromTag(t *testing.T) {
 	if got := (releaseVersion{1, 2, 3}).String(); got != "v1.2.3" {
 		t.Fatalf("String() = %q", got)
 	}
+	if got := (releaseVersion{1, 2, 3}).Tag(false); got != "1.2.3" {
+		t.Fatalf("Tag(false) = %q", got)
+	}
+	if got := (releaseVersion{1, 2, 3}).Tag(true); got != "v1.2.3" {
+		t.Fatalf("Tag(true) = %q", got)
+	}
 }
 
 func TestBumpVersion(t *testing.T) {
@@ -93,6 +99,10 @@ func TestLatestVersionTag(t *testing.T) {
 	}
 	if _, _, ok := latestVersionTag(nil); ok {
 		t.Fatal("an empty tag list has no version")
+	}
+	version, name, ok = latestVersionTag([]Tag{{Name: "v1.0.0"}, {Name: "1.2.0"}})
+	if !ok || name != "1.2.0" || version != (releaseVersion{1, 2, 0}) {
+		t.Fatalf("latestVersionTag with a bare tag = %+v, %q, %v", version, name, ok)
 	}
 }
 
@@ -230,15 +240,31 @@ func TestNormalizeReleaseDefaultsTime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg != (ReleaseConfig{IntervalDays: 1, Time: "09:00"}) {
+	if cfg != (ReleaseConfig{IntervalDays: 1, Time: "09:00", VPrefix: true}) {
 		t.Fatalf("defaults = %+v", cfg)
 	}
 	cfg, err = normalizeRelease(releaseOptions{Enabled: true, IntervalDays: 3, Time: " 7:05 "})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg != (ReleaseConfig{Enabled: true, IntervalDays: 3, Time: "07:05"}) {
+	if cfg != (ReleaseConfig{Enabled: true, IntervalDays: 3, Time: "07:05", VPrefix: true}) {
 		t.Fatalf("explicit time = %+v", cfg)
+	}
+	noPrefix := false
+	cfg, err = normalizeRelease(releaseOptions{VPrefix: &noPrefix})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.VPrefix {
+		t.Fatalf("an explicit vPrefix:false must be kept: %+v", cfg)
+	}
+	yesPrefix := true
+	cfg, err = normalizeRelease(releaseOptions{VPrefix: &yesPrefix})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.VPrefix {
+		t.Fatalf("an explicit vPrefix:true must be kept: %+v", cfg)
 	}
 	if _, err := normalizeRelease(releaseOptions{Time: "24:00"}); err == nil {
 		t.Fatal("an out-of-range time must be rejected")
@@ -267,7 +293,7 @@ func TestCheckReleaseBumpsMinorForFeature(t *testing.T) {
 		}
 	})
 	store := newReleaseTestStore(t)
-	app := releaseTestApp(gh, store, ReleaseConfig{Enabled: true, IntervalDays: 1})
+	app := releaseTestApp(gh, store, ReleaseConfig{Enabled: true, IntervalDays: 1, VPrefix: true})
 	if err := checkRelease(context.Background(), app); err != nil {
 		t.Fatal(err)
 	}
@@ -329,12 +355,45 @@ func TestCheckReleaseBumpsPatchForFixes(t *testing.T) {
 		}
 	})
 	store := newReleaseTestStore(t)
-	app := releaseTestApp(gh, store, ReleaseConfig{Enabled: true, IntervalDays: 1})
+	app := releaseTestApp(gh, store, ReleaseConfig{Enabled: true, IntervalDays: 1, VPrefix: true})
 	if err := checkRelease(context.Background(), app); err != nil {
 		t.Fatal(err)
 	}
 	if posted := releasePostBody(calls.snapshot()); !strings.Contains(posted, `"tag_name":"v1.2.4"`) {
 		t.Fatalf("release body = %q, want v1.2.4", posted)
+	}
+}
+
+func TestCheckReleaseWithoutVPrefix(t *testing.T) {
+	gh, calls := newFakeAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/acme/app/tags":
+			// A repository that switched keeps counting from its older v*
+			// tags: both forms are version tags.
+			_ = json.NewEncoder(w).Encode([]map[string]string{{"name": "v1.2.3"}, {"name": "1.2.2"}})
+		case "/repos/acme/app/compare/v1.2.3...main":
+			_ = json.NewEncoder(w).Encode(map[string]any{"commits": []map[string]any{
+				{"sha": "abcdef1234567890", "commit": map[string]string{"message": "fix: a crash"}},
+			}})
+		case "/repos/acme/app/releases":
+			w.WriteHeader(http.StatusCreated)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	store := newReleaseTestStore(t)
+	app := releaseTestApp(gh, store, ReleaseConfig{Enabled: true, IntervalDays: 1, VPrefix: false})
+	if err := checkRelease(context.Background(), app); err != nil {
+		t.Fatal(err)
+	}
+	posted := releasePostBody(calls.snapshot())
+	for _, want := range []string{`"tag_name":"1.2.4"`, `"name":"1.2.4"`, "compare/v1.2.3...1.2.4"} {
+		if !strings.Contains(posted, want) {
+			t.Fatalf("release body = %q, missing %q", posted, want)
+		}
+	}
+	if strings.Contains(posted, "v1.2.4") {
+		t.Fatalf("vPrefix:false must not publish a v tag: %q", posted)
 	}
 }
 
@@ -359,7 +418,7 @@ func TestCheckReleaseFirstReleaseIsZeroOneZero(t *testing.T) {
 		}
 	})
 	store := newReleaseTestStore(t)
-	app := releaseTestApp(gh, store, ReleaseConfig{Enabled: true, IntervalDays: 1})
+	app := releaseTestApp(gh, store, ReleaseConfig{Enabled: true, IntervalDays: 1, VPrefix: true})
 	if err := checkRelease(context.Background(), app); err != nil {
 		t.Fatal(err)
 	}
@@ -384,7 +443,7 @@ func TestCheckReleaseSkipsWithoutCommits(t *testing.T) {
 		}
 	})
 	store := newReleaseTestStore(t)
-	app := releaseTestApp(gh, store, ReleaseConfig{Enabled: true, IntervalDays: 1})
+	app := releaseTestApp(gh, store, ReleaseConfig{Enabled: true, IntervalDays: 1, VPrefix: true})
 	if err := checkRelease(context.Background(), app); err != nil {
 		t.Fatal(err)
 	}
@@ -404,7 +463,7 @@ func TestCheckReleaseSkipsWhenNotDue(t *testing.T) {
 	store.UpdateMeta("acme/app", func(meta *RepoMeta) {
 		meta.LastReleaseCheckAt = time.Now().UTC().Format(time.RFC3339)
 	})
-	app := releaseTestApp(gh, store, ReleaseConfig{Enabled: true, IntervalDays: 3})
+	app := releaseTestApp(gh, store, ReleaseConfig{Enabled: true, IntervalDays: 3, VPrefix: true})
 	if err := checkRelease(context.Background(), app); err != nil {
 		t.Fatal(err)
 	}
@@ -419,7 +478,7 @@ func TestCheckReleaseFailureKeepsTimestamp(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound)
 	})
 	store := newReleaseTestStore(t)
-	app := releaseTestApp(gh, store, ReleaseConfig{Enabled: true, IntervalDays: 1})
+	app := releaseTestApp(gh, store, ReleaseConfig{Enabled: true, IntervalDays: 1, VPrefix: true})
 	before := store.Meta("acme/app").LastReleaseCheckAt
 	if before == "" {
 		t.Fatal("the test fixture must seed a previous check")
@@ -444,8 +503,8 @@ func TestStartReleaseCheckerOnlyChecksEnabledRepos(t *testing.T) {
 		_ = json.NewEncoder(w).Encode([]map[string]any{})
 	})
 	store := newReleaseTestStore(t)
-	enabled := releaseTestApp(gh, store, ReleaseConfig{Enabled: true, IntervalDays: 1})
-	disabled := releaseTestApp(gh, store, ReleaseConfig{IntervalDays: 1})
+	enabled := releaseTestApp(gh, store, ReleaseConfig{Enabled: true, IntervalDays: 1, VPrefix: true})
+	disabled := releaseTestApp(gh, store, ReleaseConfig{IntervalDays: 1, VPrefix: true})
 	disabled.Repo.FullName = "acme/other"
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -478,4 +537,64 @@ func releasePostBody(calls []apiCall) string {
 		}
 	}
 	return ""
+}
+
+// The loop sleeps until the slot, not until the next hourly boundary: a daemon
+// that started at 08:53 used to publish the 09:00 release at 09:53.
+func TestNextReleaseCheckWakesAtTheSlot(t *testing.T) {
+	local := func(day, hour, minute int) time.Time {
+		return time.Date(2026, 11, day, hour, minute, 0, 0, time.Local)
+	}
+	cases := []struct {
+		name  string
+		last  string
+		days  int
+		at    string
+		now   time.Time
+		delay time.Duration
+	}{
+		{
+			name: "never checked, slot ahead",
+			at:   "09:00", now: local(27, 8, 30),
+			delay: 30 * time.Minute,
+		},
+		{
+			name: "never checked, slot passed",
+			at:   "09:00", now: local(27, 9, 5),
+			delay: 0,
+		},
+		{
+			name: "checked yesterday, ten minutes to go",
+			last: local(26, 9, 0).Format(time.RFC3339), days: 1, at: "09:00",
+			now:   local(27, 8, 50),
+			delay: 10 * time.Minute,
+		},
+		{
+			name: "checked today, next slot is tomorrow",
+			last: local(27, 9, 0).Format(time.RFC3339), days: 1, at: "09:00",
+			now:   local(27, 9, 10),
+			delay: releaseTick,
+		},
+		{
+			name: "two-day interval stays capped",
+			last: local(26, 9, 0).Format(time.RFC3339), days: 2, at: "09:00",
+			now:   local(27, 8, 50),
+			delay: releaseTick,
+		},
+		{
+			name: "unusable time falls back to 09:00",
+			last: local(26, 9, 0).Format(time.RFC3339), days: 1, at: "noon",
+			now:   local(27, 8, 45),
+			delay: 15 * time.Minute,
+		},
+	}
+	for _, c := range cases {
+		got := nextReleaseCheck(c.last, c.days, c.at, c.now)
+		if got != c.delay {
+			t.Fatalf("%s: nextReleaseCheck = %s, want %s", c.name, got, c.delay)
+		}
+		if got > releaseTick {
+			t.Fatalf("%s: sleep %s exceeds the hourly safety cap", c.name, got)
+		}
+	}
 }

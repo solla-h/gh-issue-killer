@@ -371,6 +371,40 @@ func pushBranch(ctx context.Context, dir string, local *LocalRepo, branch string
 	return pushBranchTo(ctx, dir, local.HTTPSURL, local.gitEnvWithToken, local.refreshToken, branch, branch)
 }
 
+// syncWorktreeBranch fast-forwards a worktree to its branch head before it
+// starts editing. Two daemon paths (an issue revision and a PR review fix) push
+// the same branch, so a worktree created earlier can be behind and its push
+// would be rejected as a non-fast-forward. Nothing else rewrites these branches,
+// so a fast-forward is enough and a diverged history is reported instead of
+// force-pushed. The fetch goes through gitWithAuthRetry so it follows the live
+// token like every other daemon git operation.
+func syncWorktreeBranch(ctx context.Context, dir, remoteURL string, env func() ([]string, string), rotate func(context.Context, string) bool, branch string) error {
+	remoteRef := "refs/remotes/origin/" + branch
+	result, err := gitWithAuthRetry(ctx, dir, env, rotate, 5*time.Minute, true,
+		"fetch", remoteURL, fmt.Sprintf("+refs/heads/%s:%s", branch, remoteRef))
+	if err != nil {
+		return err
+	}
+	// No remote branch yet (or the fetch failed): the caller's push reports the
+	// real problem, and a first revision has nothing to fast-forward to.
+	if result.Code != 0 {
+		return nil
+	}
+	currentEnv, _ := env()
+	if gitOutput(ctx, dir, currentEnv, time.Minute, "rev-parse", "--verify", remoteRef) == "" {
+		return nil
+	}
+	merge, err := gitWorktree(ctx, dir, currentEnv, 2*time.Minute, true, "merge", "--ff-only", remoteRef)
+	if err != nil {
+		return err
+	}
+	if merge.Code != 0 {
+		return fmt.Errorf("branch %s moved and cannot be fast-forwarded: %s",
+			branch, strings.TrimSpace(merge.Stderr))
+	}
+	return nil
+}
+
 // pushBranchTo pushes a local branch to an explicit remote ref. The remote may
 // be another repository: a pull request head that lives in a fork the author
 // opened for maintainers, where local and remote branch names differ.
