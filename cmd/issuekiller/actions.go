@@ -1940,17 +1940,28 @@ func ciGateWithRepairs(ctx context.Context, app *AppContext, issue Issue, st Iss
 	number := issue.Number
 	// A previous round may have left a commit in the worktree without pushing
 	// it (for example an agent that commits on its own). Publish it before
-	// gating, or the gate keeps checking the old head forever.
+	// gating, and fail the gate when that cannot be confirmed: gating the old
+	// head would drop the stranded commit silently, exactly the bug this path
+	// exists to prevent.
 	if st.Worktree != "" && pr.Head.SHA != "" {
-		if ahead, head, aheadErr := worktreeAheadOfPR(ctx, st.Worktree, app.Local, st.Branch, pr.Head.SHA); aheadErr != nil {
-			app.Log.Warn("check stranded commits for %s#%d: %v", app.Repo.FullName, number, aheadErr)
-		} else if ahead {
+		ahead, head, aheadErr := worktreeAheadOfPR(ctx, st.Worktree, app.Local, st.Branch, pr.Head.SHA)
+		if aheadErr != nil {
+			return ciVerdict{}, 0, fmt.Errorf("check stranded commits for %s#%d: %w", app.Repo.FullName, number, aheadErr)
+		}
+		if ahead {
 			app.Log.Info("publishing stranded commit %s for %s#%d", shortSHA(head), app.Repo.FullName, number)
-			if err := pushBranch(ctx, st.Worktree, app.Local, st.Branch); err == nil {
-				if refreshed, refreshErr := waitForPRHead(ctx, app, st.PRNumber, head, 2*time.Minute); refreshErr == nil {
-					pr = refreshed
-				}
+			if err := pushBranch(ctx, st.Worktree, app.Local, st.Branch); err != nil {
+				return ciVerdict{}, 0, fmt.Errorf("publish stranded commit %s for %s#%d: %w", shortSHA(head), app.Repo.FullName, number, err)
 			}
+			refreshed, refreshErr := waitForPRHead(ctx, app, st.PRNumber, head, 2*time.Minute)
+			if refreshErr != nil {
+				return ciVerdict{}, 0, fmt.Errorf("get PR after publishing stranded commit %s: %w", shortSHA(head), refreshErr)
+			}
+			if refreshed.Head.SHA != head {
+				return ciVerdict{}, 0, fmt.Errorf("publish stranded commit %s for %s#%d: PR head is still %s",
+					shortSHA(head), app.Repo.FullName, number, shortSHA(refreshed.Head.SHA))
+			}
+			pr = refreshed
 		}
 	}
 	verdict := waitForChecks(ctx, app, pr.Head.SHA, pr.Base.Ref, 10*time.Minute)
@@ -2019,8 +2030,19 @@ func worktreeAheadOfPR(ctx context.Context, worktree string, local *LocalRepo, b
 		return false, "", fmt.Errorf("fetch PR branch before checking worktree: git exited %d: %s", result.Code, strings.TrimSpace(result.Stderr))
 	}
 	ancestor, err := gitWorktree(ctx, worktree, local.gitEnv(), 30*time.Second, true, "merge-base", "--is-ancestor", prSHA, "HEAD")
-	if err != nil || ancestor.Code != 0 {
+	if err != nil {
+		return false, "", fmt.Errorf("check whether %s is an ancestor of the worktree HEAD: %w", shortSHA(prSHA), err)
+	}
+	// Exit 1 is the only answer that means "not an ancestor". Exit 128 (for
+	// example prSHA is not available locally), a timeout or any other failure
+	// means the check could not run; folding that into "not ahead" drops a
+	// stranded commit without a word.
+	if ancestor.Code == 1 {
 		return false, "", nil
+	}
+	if ancestor.Code != 0 {
+		return false, "", fmt.Errorf("check whether %s is an ancestor of the worktree HEAD: git exited %d: %s",
+			shortSHA(prSHA), ancestor.Code, strings.TrimSpace(ancestor.Stderr))
 	}
 	return true, head, nil
 }

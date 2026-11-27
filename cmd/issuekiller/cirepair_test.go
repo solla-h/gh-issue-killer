@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -71,5 +72,12 @@ func TestWorktreeAheadOfPR(t *testing.T) {
 	}
 	if ahead, _, err := worktreeAheadOfPR(ctx, work, local, "missing-branch", remoteHead); err == nil || ahead {
 		t.Fatalf("ahead = %v, err = %v, want fetch failure error", ahead, err)
+	}
+	// Exit 128 from merge-base means the commit is not available locally, not
+	// that the worktree is behind. Folding it into "not ahead" would drop the
+	// stranded commit silently.
+	missingSHA := strings.Repeat("0", 40)
+	if ahead, _, err := worktreeAheadOfPR(ctx, work, local, "main", missingSHA); err == nil || ahead {
+		t.Fatalf("ahead = %v, err = %v, want merge-base failure error", ahead, err)
 	}
 }

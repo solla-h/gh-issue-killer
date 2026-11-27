@@ -467,12 +467,14 @@ func main() {
 		// The watcher runs for the daemon's lifetime, so it gets a factory
 		// rather than one environment: its git calls must follow token
 		// rotations exactly like job git operations do.
-		masterEnv := func() []string { return os.Environ() }
+		masterEnv := func() ([]string, string) { return os.Environ(), "" }
+		var masterRotate func(context.Context, string) bool
 		for _, app := range contexts {
-			masterEnv = app.Env
+			masterEnv = app.envWithToken
+			masterRotate = app.refreshToken
 			break
 		}
-		masterRestart = watchMaster(ctx, log, masterEnv)
+		masterRestart = watchMaster(ctx, log, masterEnv, masterRotate)
 		if cfg.SelfUpdate {
 			log.Warn("config: followMaster is on; release installs are skipped while following master")
 		}

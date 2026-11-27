@@ -506,15 +506,16 @@ func masterWatchBaseline(head, buildCommit string) string {
 // the machine, because the dashboard is compiled from frontend/ into the binary.
 // The returned channel fires once after a successful rebuild; the caller waits
 // for idle jobs and re-execs.
-func watchMaster(ctx context.Context, log *Logger, env func() []string) <-chan struct{} {
-	return watchMasterLoop(ctx, log, env, masterCheck, masterSettle, remoteMasterHead, rebuildFromMaster)
+func watchMaster(ctx context.Context, log *Logger, env func() ([]string, string), rotate func(context.Context, string) bool) <-chan struct{} {
+	return watchMasterLoop(ctx, log, env, rotate, masterCheck, masterSettle, remoteMasterHead, rebuildFromMaster)
 }
 
 // watchMasterLoop is watchMaster with the interval, settle delay, head read and
 // rebuild injected, so the retry path can be tested without git and a 30 s wait.
-func watchMasterLoop(ctx context.Context, log *Logger, env func() []string, every, settle time.Duration,
-	head func(context.Context, func() []string) string,
-	rebuild func(context.Context, *Logger, func() []string, string) error) <-chan struct{} {
+func watchMasterLoop(ctx context.Context, log *Logger, env func() ([]string, string), rotate func(context.Context, string) bool,
+	every, settle time.Duration,
+	head func(context.Context, func() ([]string, string), func(context.Context, string) bool) string,
+	rebuild func(context.Context, *Logger, func() ([]string, string), func(context.Context, string) bool, string) error) <-chan struct{} {
 	ready := make(chan struct{}, 1)
 	go func() {
 		ticker := time.NewTicker(every)
@@ -525,19 +526,19 @@ func watchMasterLoop(ctx context.Context, log *Logger, env func() []string, ever
 			// An empty head is a failed read (an expired token at that instant, a
 			// proxy hiccup), not a reason to disable the watcher for the daemon's
 			// lifetime: keep the baseline and retry on the next tick.
-			if next := head(ctx, env); next != "" {
+			if next := head(ctx, env, rotate); next != "" {
 				if !seeded {
 					last = masterWatchBaseline(next, commit)
 					seeded = true
 					log.Debug("master update: watching %s at %s", masterBranch, shortSHA(last))
 				} else if next != last {
 					time.Sleep(settle)
-					if settled := head(ctx, env); settled != "" {
+					if settled := head(ctx, env, rotate); settled != "" {
 						next = settled
 					}
 					log.Info("master update: new %s commit %s; rebuilding", masterBranch, shortSHA(next))
 					last = next
-					if err := rebuild(ctx, log, env, next); err != nil {
+					if err := rebuild(ctx, log, env, rotate, next); err != nil {
 						log.Error("master update: %v (keeping the running binary)", err)
 					} else {
 						select {
@@ -561,16 +562,9 @@ func watchMasterLoop(ctx context.Context, log *Logger, env func() []string, ever
 	return ready
 }
 
-func remoteMasterHead(ctx context.Context, env func() []string) string {
-	git, err := gitBinary()
-	if err != nil {
-		return ""
-	}
-	result, err := runCmd(ctx, git, []string{"ls-remote", masterRepoURL, "refs/heads/" + masterBranch}, CmdOptions{
-		Env:          env(),
-		Timeout:      30 * time.Second,
-		AllowFailure: true,
-	})
+func remoteMasterHead(ctx context.Context, env func() ([]string, string), rotate func(context.Context, string) bool) string {
+	result, err := gitWithAuthRetry(ctx, "", env, rotate, 30*time.Second, true,
+		"ls-remote", masterRepoURL, "refs/heads/"+masterBranch)
 	if err != nil || result.Code != 0 {
 		return ""
 	}
@@ -588,7 +582,7 @@ func headFromLSRemote(out string) string {
 // rebuildFromMaster builds the latest master in a dedicated clone and replaces
 // the running executable. The build goes to a temporary file first, so a failed
 // build never replaces a working binary.
-func rebuildFromMaster(ctx context.Context, log *Logger, env func() []string, head string) error {
+func rebuildFromMaster(ctx context.Context, log *Logger, env func() ([]string, string), rotate func(context.Context, string) bool, head string) error {
 	git, err := gitBinary()
 	if err != nil {
 		return err
@@ -608,31 +602,35 @@ func rebuildFromMaster(ctx context.Context, log *Logger, env func() []string, he
 	if resolved, resolveErr := filepath.EvalSymlinks(exe); resolveErr == nil {
 		exe = resolved
 	}
+	envSlice := func() []string {
+		current, _ := env()
+		return current
+	}
 	dir := filepath.Join(stateDir(), "self")
 	if !fileExists(filepath.Join(dir, "go.mod")) {
 		_ = os.RemoveAll(dir)
 		log.Info("master update: cloning %s into %s", masterRepoURL, dir)
-		if _, err := runCmd(ctx, git, []string{"clone", "--depth", "1", "--branch", masterBranch, masterRepoURL, dir}, CmdOptions{
-			Env:     env(),
-			Timeout: 10 * time.Minute,
-		}); err != nil {
+		// Clone and fetch are the authenticated steps of a rebuild; route them
+		// through the auth retry so a token that rotates mid-rebuild does not
+		// fail this master commit until the next push.
+		if _, err := gitWithAuthRetry(ctx, "", env, rotate, 10*time.Minute, false,
+			"clone", "--depth", "1", "--branch", masterBranch, masterRepoURL, dir); err != nil {
 			return fmt.Errorf("clone: %w", err)
 		}
 	}
-	if _, err := runCmd(ctx, git, []string{"-C", dir, "fetch", "--depth", "1", "origin",
-		"+refs/heads/" + masterBranch + ":refs/remotes/origin/" + masterBranch}, CmdOptions{
-		Env:     env(),
-		Timeout: 5 * time.Minute,
-	}); err != nil {
+	if _, err := gitWithAuthRetry(ctx, dir, env, rotate, 5*time.Minute, false,
+		"fetch", "--depth", "1", "origin",
+		"+refs/heads/"+masterBranch+":refs/remotes/origin/"+masterBranch); err != nil {
 		return fmt.Errorf("fetch: %w", err)
 	}
-	if _, err := runCmd(ctx, git, []string{"-C", dir, "reset", "--hard", "origin/" + masterBranch}, CmdOptions{
-		Env:     env(),
+	if _, err := runCmd(ctx, git, []string{"reset", "--hard", "origin/" + masterBranch}, CmdOptions{
+		Cwd:     dir,
+		Env:     envSlice(),
 		Timeout: time.Minute,
 	}); err != nil {
 		return fmt.Errorf("checkout: %w", err)
 	}
-	if err := buildDashboard(ctx, log, npmBin, dir, env()); err != nil {
+	if err := buildDashboard(ctx, log, npmBin, dir, envSlice()); err != nil {
 		return err
 	}
 
@@ -641,7 +639,7 @@ func rebuildFromMaster(ctx context.Context, log *Logger, env func() []string, he
 		"-ldflags", "-X main.commit=" + head,
 		"-o", tmp, "./cmd/issuekiller"}, CmdOptions{
 		Cwd:     dir,
-		Env:     env(),
+		Env:     envSlice(),
 		Timeout: 10 * time.Minute,
 	}); err != nil {
 		_ = os.Remove(tmp)

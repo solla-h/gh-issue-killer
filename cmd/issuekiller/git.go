@@ -124,9 +124,22 @@ func buildGitEnv(proxy *Proxy, token string, identity User) []string {
 }
 
 func resolveRepo(ctx context.Context, repo RepoConfig, info RepoInfo, identity User, token func() string, refresh func(ctx context.Context, failed string) (string, error), proxy *Proxy) (*LocalRepo, error) {
-	env := buildGitEnv(proxy, token(), identity)
 	httpsURL := fmt.Sprintf("https://github.com/%s.git", repo.FullName)
 	cloneDir := filepath.Join(reposDir(), repo.Owner+"-"+repo.Name)
+	worktreeRoot := repo.WorktreeRoot
+	if worktreeRoot == "" {
+		worktreeRoot = filepath.Join(treesDir(), repo.Owner+"-"+repo.Name)
+	}
+	local := &LocalRepo{
+		Dir:          cloneDir,
+		HTTPSURL:     httpsURL,
+		Base:         info.DefaultBranch,
+		WorktreeRoot: worktreeRoot,
+		proxy:        proxy,
+		identity:     identity,
+		token:        token,
+		refresh:      refresh,
+	}
 	if err := os.MkdirAll(reposDir(), 0o755); err != nil {
 		return nil, err
 	}
@@ -135,15 +148,11 @@ func resolveRepo(ctx context.Context, repo RepoConfig, info RepoInfo, identity U
 		if entries, readErr := os.ReadDir(cloneDir); readErr == nil && len(entries) > 0 {
 			return nil, fmt.Errorf("managed clone path exists but is not a git repository: %s", cloneDir)
 		}
-		git, gitErr := gitBinary()
-		if gitErr != nil {
-			return nil, gitErr
-		}
-		result, runErr := runCmd(ctx, git, []string{"clone", httpsURL, cloneDir}, CmdOptions{
-			Cwd:     reposDir(),
-			Env:     env,
-			Timeout: 15 * time.Minute,
-		})
+		// The clone can run for 15 minutes; use the same live token and auth
+		// retry as every other daemon git operation instead of a startup
+		// snapshot.
+		result, runErr := gitWithAuthRetry(ctx, reposDir(), local.gitEnvWithToken, local.refreshToken, 15*time.Minute, false,
+			"clone", httpsURL, cloneDir)
 		if runErr != nil {
 			return nil, fmt.Errorf("clone %s: %w (%s)", repo.FullName, runErr, tailString(result.Stderr, 10))
 		}
@@ -154,30 +163,17 @@ func resolveRepo(ctx context.Context, repo RepoConfig, info RepoInfo, identity U
 		}
 		_, _ = runCmd(ctx, git, []string{"remote", "set-url", "origin", httpsURL}, CmdOptions{
 			Cwd:          cloneDir,
-			Env:          env,
+			Env:          local.gitEnv(),
 			Timeout:      30 * time.Second,
 			AllowFailure: true,
 		})
 	}
 
-	worktreeRoot := repo.WorktreeRoot
-	if worktreeRoot == "" {
-		worktreeRoot = filepath.Join(treesDir(), repo.Owner+"-"+repo.Name)
-	}
 	if err := os.MkdirAll(worktreeRoot, 0o755); err != nil {
 		return nil, err
 	}
 
-	return &LocalRepo{
-		Dir:          cloneDir,
-		HTTPSURL:     httpsURL,
-		Base:         info.DefaultBranch,
-		WorktreeRoot: worktreeRoot,
-		proxy:        proxy,
-		identity:     identity,
-		token:        token,
-		refresh:      refresh,
-	}, nil
+	return local, nil
 }
 
 func gitRun(ctx context.Context, local *LocalRepo, timeout time.Duration, allowFailure bool, args ...string) (CmdResult, error) {

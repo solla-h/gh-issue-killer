@@ -284,6 +284,51 @@ func TestLocalRepoRefreshTokenUsesHook(t *testing.T) {
 	}
 }
 
+// The initial clone can run for 15 minutes, so it must not pin the token the
+// daemon verified at startup: a 401 there uses the same refresh and retry.
+func TestResolveRepoCloneRetriesAfterTokenRotation(t *testing.T) {
+	stateDirOverride = t.TempDir()
+	t.Cleanup(func() { stateDirOverride = "" })
+	bin := t.TempDir()
+	counter := filepath.Join(t.TempDir(), "clone-count")
+	script := "#!/bin/sh\n" +
+		"n=0\n" +
+		"[ -f \"$COUNT_FILE\" ] && n=$(cat \"$COUNT_FILE\")\n" +
+		"n=$((n+1))\n" +
+		"echo $n > \"$COUNT_FILE\"\n" +
+		"if [ \"$n\" = 1 ]; then\n" +
+		"  echo 'fatal: Authentication failed' >&2\n" +
+		"  exit 128\n" +
+		"fi\n" +
+		"mkdir -p \"$3/.git\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("COUNT_FILE", counter)
+
+	token := "gho_first"
+	var failed string
+	refresh := func(_ context.Context, stale string) (string, error) {
+		failed = stale
+		token = "gho_second"
+		return token, nil
+	}
+	local, err := resolveRepo(context.Background(),
+		RepoConfig{Owner: "acme", Name: "app", FullName: "acme/app"},
+		RepoInfo{DefaultBranch: "main"}, User{},
+		func() string { return token }, refresh, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed != "gho_first" {
+		t.Fatalf("refresh failed token = %q, want gho_first", failed)
+	}
+	if got := local.token(); got != "gho_second" {
+		t.Fatalf("repo token = %q, want gho_second", got)
+	}
+}
+
 // The live failure from the bug report and GitHub's 401 wording must both be
 // recognised; a plain missing ref must not be mistaken for an auth failure.
 func TestGitAuthFailedMarkers(t *testing.T) {
