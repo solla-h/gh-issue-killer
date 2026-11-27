@@ -208,9 +208,10 @@ func TestRetryBlockedCIResumesInterruptedMerge(t *testing.T) {
 	}
 }
 
-// A merge that keeps failing must not restart on every poll. The process
-// remembers one resume; a new process (a restart) gets one fresh attempt.
-func TestRetryBlockedCIResumeIsBoundedPerProcess(t *testing.T) {
+// A resume that exits through a guard before doMerge must not consume the
+// process's attempt: a transient GetIssue failure leaves the issue at merging
+// and the next scan must queue the resume again.
+func TestRetryBlockedCIGuardFailureStaysRetryable(t *testing.T) {
 	store := &Store{file: filepath.Join(t.TempDir(), "state.json"), state: State{Version: 1, Repos: map[string]*RepoState{}}}
 	store.UpdateIssue("acme/app", 5, func(st *IssueState) {
 		st.Phase = "merging"
@@ -235,14 +236,14 @@ func TestRetryBlockedCIResumeIsBoundedPerProcess(t *testing.T) {
 		pools:  map[string]*repoPool{"acme/app": pool},
 		active: map[string]bool{}, queued: map[string]bool{}, cancels: map[string]context.CancelFunc{},
 	}
+	key := "acme/app#5"
 	router.retryBlockedCI(context.Background(), app)
 	if got := len(pool.work); got != 1 {
 		t.Fatalf("first scan queued %d jobs, want 1", got)
 	}
-	key := "acme/app#5"
 	job := <-pool.work
 	// Run the job the way the worker would, then release the key: the GetIssue
-	// failure leaves the phase at merging, the case that used to loop.
+	// failure leaves the phase at merging.
 	router.mu.Lock()
 	delete(router.queued, key)
 	router.active[key] = true
@@ -254,19 +255,119 @@ func TestRetryBlockedCIResumeIsBoundedPerProcess(t *testing.T) {
 	if got := store.Issue("acme/app", 5).Phase; got != "merging" {
 		t.Fatalf("phase = %q, want merging after the failed resume", got)
 	}
+	if router.resumeAlreadyTried(key, 50) {
+		t.Fatal("guard exit consumed the resume attempt")
+	}
+	router.retryBlockedCI(context.Background(), app)
+	if got := len(pool.work); got != 1 {
+		t.Fatalf("next scan queued %d jobs, want 1", got)
+	}
+}
+
+// Once a resume actually enters doMerge, a crash that leaves phase=merging
+// must not restart every poll. The process remembers one attempt per PR; a
+// new process (a restart) gets one fresh attempt.
+func TestRetryBlockedCIResumeIsBoundedPerProcess(t *testing.T) {
+	store := &Store{file: filepath.Join(t.TempDir(), "state.json"), state: State{Version: 1, Repos: map[string]*RepoState{}}}
+	store.UpdateIssue("acme/app", 5, func(st *IssueState) {
+		st.Phase = "merging"
+		st.PRNumber = 50
+	})
+	gh, _ := newFakeAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/app/issues/5":
+			_ = json.NewEncoder(w).Encode(map[string]any{"number": 5, "state": "open"})
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/app/pulls/50":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"number": 50, "state": "open", "mergeable": true, "mergeable_state": "clean",
+				"base": map[string]any{"ref": "master"},
+			})
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/labels"):
+			_ = json.NewEncoder(w).Encode([]any{})
+		case r.Method == http.MethodPut && r.URL.Path == "/repos/acme/app/pulls/50/merge":
+			_ = json.NewEncoder(w).Encode(map[string]any{"merged": true})
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		}
+	})
+	app := &AppContext{
+		Cfg:   &Config{MaxFixRounds: 1},
+		Repo:  RepoConfig{FullName: "acme/app"},
+		Local: &LocalRepo{Base: "master"},
+		GH:    gh,
+		Store: store,
+		Log:   NewSilentLogger(),
+	}
+	pool := &repoPool{plan: make(chan routerJob, 1), work: make(chan routerJob, 1), ci: make(chan routerJob, 1)}
+	router := &Router{
+		store: store, log: NewSilentLogger(),
+		pools:  map[string]*repoPool{"acme/app": pool},
+		active: map[string]bool{}, queued: map[string]bool{}, cancels: map[string]context.CancelFunc{},
+	}
+	key := "acme/app#5"
+	router.retryBlockedCI(context.Background(), app)
+	if got := len(pool.work); got != 1 {
+		t.Fatalf("first scan queued %d jobs, want 1", got)
+	}
+	job := <-pool.work
+	router.mu.Lock()
+	delete(router.queued, key)
+	router.active[key] = true
+	router.mu.Unlock()
+	job.fn(context.Background())
+	router.mu.Lock()
+	delete(router.active, key)
+	router.mu.Unlock()
+	if got := store.Issue("acme/app", 5).Phase; got != "done" {
+		t.Fatalf("phase = %q, want done after the resumed merge", got)
+	}
+	if !router.resumeAlreadyTried(key, 50) {
+		t.Fatal("entering doMerge did not consume the resume attempt")
+	}
+	// Simulate that merge crashing after it left phase=merging behind.
+	store.UpdateIssue("acme/app", 5, func(st *IssueState) { st.Phase = "merging" })
 	router.retryBlockedCI(context.Background(), app)
 	if got := len(pool.work); got != 0 {
 		t.Fatalf("second scan in the same process queued %d jobs, want 0", got)
 	}
 
+	restartPool := &repoPool{plan: make(chan routerJob, 1), work: make(chan routerJob, 1), ci: make(chan routerJob, 1)}
 	restarted := &Router{
+		store: store, log: NewSilentLogger(),
+		pools:  map[string]*repoPool{"acme/app": restartPool},
+		active: map[string]bool{}, queued: map[string]bool{}, cancels: map[string]context.CancelFunc{},
+	}
+	restarted.retryBlockedCI(context.Background(), app)
+	if got := len(restartPool.work); got != 1 {
+		t.Fatalf("restarted process queued %d jobs, want 1", got)
+	}
+}
+
+// The one-shot resume is per PR: a reopened issue that gets a new PR must not
+// inherit the previous round's mark.
+func TestRetryBlockedCIResumeIsPerPR(t *testing.T) {
+	store := &Store{file: filepath.Join(t.TempDir(), "state.json"), state: State{Version: 1, Repos: map[string]*RepoState{}}}
+	store.UpdateIssue("acme/app", 5, func(st *IssueState) {
+		st.Phase = "merging"
+		st.PRNumber = 50
+	})
+	pool := &repoPool{plan: make(chan routerJob, 1), work: make(chan routerJob, 1), ci: make(chan routerJob, 1)}
+	router := &Router{
 		store: store, log: NewSilentLogger(),
 		pools:  map[string]*repoPool{"acme/app": pool},
 		active: map[string]bool{}, queued: map[string]bool{}, cancels: map[string]context.CancelFunc{},
 	}
-	restarted.retryBlockedCI(context.Background(), app)
+	app := &AppContext{Repo: RepoConfig{FullName: "acme/app"}, Store: store, Log: NewSilentLogger()}
+	key := "acme/app#5"
+	router.markResumed(key, 50)
+	router.retryBlockedCI(context.Background(), app)
+	if got := len(pool.work); got != 0 {
+		t.Fatalf("same PR queued %d jobs, want 0", got)
+	}
+	store.UpdateIssue("acme/app", 5, func(st *IssueState) { st.PRNumber = 51 })
+	router.retryBlockedCI(context.Background(), app)
 	if got := len(pool.work); got != 1 {
-		t.Fatalf("restarted process queued %d jobs, want 1", got)
+		t.Fatalf("new PR queued %d jobs, want 1", got)
 	}
 }
 
@@ -422,23 +523,95 @@ func TestRetryBlockedCICancelsClosedIssueWithUnmergedPR(t *testing.T) {
 	}
 }
 
-// Every early exit leaves the retry flag intact so a later scan can try again.
-func TestRetryBlockedCIJobGuardsKeepFlag(t *testing.T) {
+// Guard exits before doMerge keep the retry flag so a later scan can try again.
+// A closed issue is terminal: it must cancel and clear the flag instead of
+// re-arming the same warn-only job every poll.
+// A PR closed without merging while the issue is still open must end the task
+// and clean up, not mark the open issue done: that would look like a reopen on
+// the next poll and start a new planning round.
+func TestRetryBlockedCICancelsOpenIssueWithClosedPR(t *testing.T) {
+	oldState := stateDirOverride
+	stateDirOverride = t.TempDir()
+	t.Cleanup(func() { stateDirOverride = oldState })
+	worktree := filepath.Join(treesDir(), "issue-5")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatalf("create worktree: %v", err)
+	}
+	store := &Store{file: filepath.Join(t.TempDir(), "state.json"), state: State{Version: 1, Repos: map[string]*RepoState{}}}
+	store.UpdateIssue("acme/app", 5, func(st *IssueState) {
+		st.Phase = "merging"
+		st.BlockedByCI = true
+		st.PRNumber = 50
+		st.Branch = "agent/issue-5-test"
+		st.Worktree = worktree
+	})
+	gh, _ := newFakeAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/app/issues/5":
+			_ = json.NewEncoder(w).Encode(map[string]any{"number": 5, "state": "open"})
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/app/pulls/50":
+			_ = json.NewEncoder(w).Encode(map[string]any{"number": 50, "state": "closed", "merged": false})
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/labels"):
+			_ = json.NewEncoder(w).Encode([]any{})
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		}
+	})
+	app := &AppContext{
+		Cfg:   &Config{MaxFixRounds: 1},
+		Repo:  RepoConfig{FullName: "acme/app"},
+		Local: &LocalRepo{Dir: t.TempDir()},
+		GH:    gh,
+		Store: store,
+		Log:   NewSilentLogger(),
+	}
+	pool := &repoPool{plan: make(chan routerJob, 1), work: make(chan routerJob, 1), ci: make(chan routerJob, 1)}
+	router := &Router{
+		store: store, log: NewSilentLogger(),
+		pools:  map[string]*repoPool{"acme/app": pool},
+		active: map[string]bool{}, queued: map[string]bool{}, cancels: map[string]context.CancelFunc{},
+	}
+	router.retryBlockedCI(context.Background(), app)
+	if got := len(pool.work); got != 1 {
+		t.Fatalf("scan queued %d jobs, want 1", got)
+	}
+	job := <-pool.work
+	job.fn(context.Background())
+	got := store.Issue("acme/app", 5)
+	if got.Phase != "cancelled" {
+		t.Fatalf("phase = %q, want cancelled", got.Phase)
+	}
+	if got.IssueClosed {
+		t.Fatal("cancelling an open issue recorded it as closed")
+	}
+	if got.BlockedByCI {
+		t.Fatal("cancelling a closed PR kept BlockedByCI set")
+	}
+	if wasReopened(got) {
+		t.Fatal("a cancelled open issue must not look reopened to the poller")
+	}
+	if _, err := os.Stat(worktree); !os.IsNotExist(err) {
+		t.Fatalf("worktree %s still exists after the cancelled merge", worktree)
+	}
+}
+
+func TestRetryBlockedCIJobGuards(t *testing.T) {
 	cases := []struct {
 		name       string
 		issueCode  int
 		issueState string
 		afterQueue func(*Store)
 		wantPhase  string
+		wantFlag   bool
 	}{
-		{"get issue error", http.StatusInternalServerError, "open", nil, "blocked"},
-		{"issue closed", 0, "closed", nil, "blocked"},
+		{"get issue error", http.StatusInternalServerError, "open", nil, "blocked", true},
+		{"issue closed", 0, "closed", nil, "cancelled", false},
 		{"phase changed", 0, "open", func(store *Store) {
 			store.UpdateIssue("acme/app", 5, func(st *IssueState) { st.Phase = "implementing" })
-		}, "implementing"},
+		}, "implementing", true},
 		{"no PR", 0, "open", func(store *Store) {
 			store.UpdateIssue("acme/app", 5, func(st *IssueState) { st.PRNumber = 0 })
-		}, "blocked"},
+		}, "blocked", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -496,8 +669,8 @@ func TestRetryBlockedCIJobGuardsKeepFlag(t *testing.T) {
 			if got.Phase != tc.wantPhase {
 				t.Fatalf("phase = %q, want %q", got.Phase, tc.wantPhase)
 			}
-			if !got.BlockedByCI {
-				t.Fatal("guard exit cleared BlockedByCI")
+			if got.BlockedByCI != tc.wantFlag {
+				t.Fatalf("BlockedByCI = %v, want %v", got.BlockedByCI, tc.wantFlag)
 			}
 		})
 	}

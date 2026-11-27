@@ -2352,11 +2352,7 @@ func doMerge(ctx context.Context, app *AppContext, trigger Trigger, issue Issue,
 			finishMergedIssue(ctx, app, number, st)
 			return
 		}
-		app.Store.UpdateIssue(app.Repo.FullName, number, func(state *IssueState) {
-			state.Phase = "done"
-			state.BlockedByCI = false
-		})
-		app.GH.SetAgentState(ctx, app.Repo.FullName, number, "")
+		cancelUnmergedPR(ctx, app, issue, st)
 		return
 	}
 
@@ -2392,11 +2388,7 @@ func doMerge(ctx context.Context, app *AppContext, trigger Trigger, issue Issue,
 					finishMergedIssue(ctx, app, number, st)
 					return
 				}
-				app.Store.UpdateIssue(app.Repo.FullName, number, func(state *IssueState) {
-					state.Phase = "done"
-					state.BlockedByCI = false
-				})
-				app.GH.SetAgentState(ctx, app.Repo.FullName, number, "")
+				cancelUnmergedPR(ctx, app, issue, st)
 				return
 			}
 			skipConflictCheck = true
@@ -2494,6 +2486,34 @@ func finishMergedIssue(ctx context.Context, app *AppContext, number int, st Issu
 		app.text(number, "merge.done.footer"),
 	}, "\n"))
 	app.Log.Info("merged %s#%d", app.Repo.FullName, number)
+}
+
+// cancelUnmergedPR cleans up a task whose PR was closed without merging while
+// the issue stayed open. Marking it done would make the next poll mistake the
+// still-open issue for a reopen and start a new round, while doCloseIssue would
+// record the open issue as closed. Cancel it and drop the branch like the
+// closed-issue path does.
+func cancelUnmergedPR(ctx context.Context, app *AppContext, issue Issue, st IssueState) {
+	number := issue.Number
+	app.Log.Info("PR %s#%d was closed without merging; cancelling %s#%d", app.Repo.FullName, st.PRNumber, app.Repo.FullName, number)
+	if st.Branch != "" {
+		_ = app.GH.DeleteBranch(ctx, app.Repo.FullName, st.Branch)
+	}
+	if st.Worktree != "" {
+		removeWorktree(ctx, app.Local, st.Worktree, true)
+		if st.Branch != "" {
+			deleteLocalBranch(ctx, app.Local, st.Branch)
+		}
+	}
+	app.Store.UpdateIssue(app.Repo.FullName, number, func(state *IssueState) {
+		state.Phase = "cancelled"
+		state.CancelledAt = nowISO()
+		state.IssueClosed = false
+		state.Worktree = ""
+		state.Branch = ""
+		state.BlockedByCI = false
+	})
+	app.GH.SetAgentState(ctx, app.Repo.FullName, number, "")
 }
 
 func doCloseIssue(ctx context.Context, app *AppContext, issue Issue, st IssueState) {

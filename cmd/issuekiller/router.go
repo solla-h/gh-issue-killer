@@ -159,10 +159,12 @@ type Router struct {
 	queued     map[string]bool
 	cancels    map[string]context.CancelFunc
 	started    map[string]time.Time
-	// resumed records interrupted merges this process already re-entered, so a
-	// job that leaves phase=merging behind again cannot restart every poll. A
-	// new process starts empty: that is exactly the restart recovery case.
-	resumed map[string]bool
+	// resumed records, per issue, the PR whose interrupted merge this process
+	// already re-entered, so a job that leaves phase=merging behind again
+	// cannot restart every poll. Keying by PR lets a reopened issue that gets a
+	// new PR try its own recovery. A new process starts empty: that is exactly
+	// the restart recovery case.
+	resumed map[string]int
 	// prLocks serializes the jobs that write one pull request's branch; see
 	// serialize.
 	prLocks map[string]*sync.Mutex
@@ -180,7 +182,7 @@ func NewRouter(cfg *Config, contexts map[string]*AppContext, agentLogin string, 
 		queued:     map[string]bool{},
 		cancels:    map[string]context.CancelFunc{},
 		started:    map[string]time.Time{},
-		resumed:    map[string]bool{},
+		resumed:    map[string]int{},
 		prLocks:    map[string]*sync.Mutex{},
 	}
 	planWorkers := cfg.PlanParallel
@@ -685,14 +687,13 @@ func (r *Router) retryBlockedCI(ctx context.Context, app *AppContext) {
 			// A daemon death inside doMerge leaves the phase here, and both job
 			// maps are empty after a restart. Re-enter doMerge, which finishes an
 			// already-merged PR through its pr.State != "open" path. One attempt
-			// per process is enough for that recovery; a merge that keeps
+			// per process and PR is enough for that recovery; a merge that keeps
 			// panicking must not restart on every poll.
-			if r.resumeAlreadyTried(key) {
+			if r.resumeAlreadyTried(key, st.PRNumber) {
 				r.log.Debug("interrupted merge %s#%d was already resumed by this process", app.Repo.FullName, number)
 				continue
 			}
 			if r.enqueue(app.Repo.FullName, key, stageWork, r.retryBlockedCIMergeJob(app, number)) {
-				r.markResumed(key)
 				r.log.Info("interrupted merge %s#%d has no running job; resuming", app.Repo.FullName, number)
 			}
 			continue
@@ -717,34 +718,47 @@ func (r *Router) retryBlockedCI(ctx context.Context, app *AppContext) {
 // retryBlockedCIMergeJob is the job body shared by a CI-blocked retry and the
 // resume of an interrupted merge. A guard exit on a blocked task leaves
 // BlockedByCI set so the next scan can try again; doMerge owns the terminal
-// phase and flag. An interrupted merge is marked resumed before the job runs,
-// so a guard exit there cannot re-enqueue the same job every poll.
+// phase and flag. A resume is marked only when the job reaches doMerge, and the
+// guards clear the mark, so a transient GetIssue/GetPR failure stays retryable
+// instead of consuming the process's one attempt.
 func (r *Router) retryBlockedCIMergeJob(app *AppContext, number int) func(context.Context) {
+	key := fmt.Sprintf("%s#%d", app.Repo.FullName, number)
 	return func(jobCtx context.Context) {
 		issue, err := app.GH.GetIssue(jobCtx, app.Repo.FullName, number)
 		if err != nil {
+			r.clearResumed(key)
 			r.log.Warn("blocked CI retry %s#%d stopped: get issue: %v", app.Repo.FullName, number, err)
 			return
 		}
 		current := r.store.Issue(app.Repo.FullName, number)
 		if issue.State != "open" {
-			if current.Phase == "merging" {
+			if current.Phase == "blocked" || current.Phase == "merging" {
 				// The daemon's PR body contains "Closes #N", so GitHub closes
-				// the issue as soon as the merge lands. The crash this resume
-				// exists for therefore leaves a closed issue, not an open one.
+				// the issue as soon as the merge lands. A closed issue is
+				// terminal in either phase: finish an already-merged PR, or
+				// cancel and clean up one that did not merge. Otherwise a
+				// missed issue.closed delivery would re-arm this job forever.
 				r.finishClosedMerge(jobCtx, app, number, issue, current)
 				return
 			}
+			r.clearResumed(key)
 			r.log.Warn("blocked CI retry %s#%d stopped: issue is %s", app.Repo.FullName, number, issue.State)
 			return
 		}
 		if current.Phase != "blocked" && current.Phase != "merging" {
+			r.clearResumed(key)
 			r.log.Warn("blocked CI retry %s#%d stopped: phase changed to %q", app.Repo.FullName, number, current.Phase)
 			return
 		}
 		if current.PRNumber == 0 {
+			r.clearResumed(key)
 			r.log.Warn("blocked CI retry %s#%d stopped: no PR", app.Repo.FullName, number)
 			return
+		}
+		if current.Phase == "merging" {
+			// Now the process has really re-entered doMerge: a crash from here
+			// on is bounded to one resume per PR per process.
+			r.markResumed(key, current.PRNumber)
 		}
 		doMerge(jobCtx, app, Trigger{
 			Type:        "retry",
@@ -755,14 +769,15 @@ func (r *Router) retryBlockedCIMergeJob(app *AppContext, number int) func(contex
 	}
 }
 
-// finishClosedMerge resolves an interrupted merge whose issue GitHub already
+// finishClosedMerge resolves a retry or resume whose issue GitHub already
 // closed. A merged PR is completed like any successful merge; an unmerged PR
 // means the issue was closed by a human, so the task is cancelled and cleaned
-// up instead of leaving phase=merging behind for the next poll.
+// up instead of leaving its phase behind for the next poll.
 func (r *Router) finishClosedMerge(ctx context.Context, app *AppContext, number int, issue Issue, st IssueState) {
 	if st.PRNumber != 0 {
 		pr, err := app.GH.GetPR(ctx, app.Repo.FullName, st.PRNumber)
 		if err != nil {
+			r.clearResumed(fmt.Sprintf("%s#%d", app.Repo.FullName, number))
 			r.log.Warn("blocked CI retry %s#%d stopped: get PR: %v", app.Repo.FullName, number, err)
 			return
 		}
@@ -771,25 +786,25 @@ func (r *Router) finishClosedMerge(ctx context.Context, app *AppContext, number 
 			return
 		}
 	}
-	r.log.Info("interrupted merge %s#%d: issue is %s and PR is not merged; cancelling", app.Repo.FullName, number, issue.State)
+	r.log.Info("closed issue %s#%d: PR is not merged; cancelling", app.Repo.FullName, number)
 	doCloseIssue(ctx, app, issue, st)
 }
 
 // resumeAlreadyTried reports whether this process already re-entered doMerge
-// for the issue.
-func (r *Router) resumeAlreadyTried(key string) bool {
+// for the issue's current PR.
+func (r *Router) resumeAlreadyTried(key string, prNumber int) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.resumed[key]
+	return prNumber != 0 && r.resumed[key] == prNumber
 }
 
-func (r *Router) markResumed(key string) {
+func (r *Router) markResumed(key string, prNumber int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.resumed == nil {
-		r.resumed = map[string]bool{}
+		r.resumed = map[string]int{}
 	}
-	r.resumed[key] = true
+	r.resumed[key] = prNumber
 }
 
 // clearResumed forgets an old resume when a fresh merge starts, so an issue
