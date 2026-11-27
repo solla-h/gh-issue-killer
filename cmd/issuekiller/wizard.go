@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -429,6 +430,9 @@ func listCodingAgentModels(codingAgent string) []string {
 }
 
 // checkRepoAccess verifies the token's role and webhook capability per repo.
+// It runs a few repos at a time: two requests per repo through a proxy is slow
+// enough that the projects page shows the list first and fills the roles in a
+// second request. Results keep the input order for stable output.
 func checkRepoAccess(proxy *Proxy, repos []string) ([]repoAccessInfo, error) {
 	gh, err := NewGHWithTimeout(proxy, NewSilentLogger(), 20*time.Second)
 	if err != nil {
@@ -437,31 +441,41 @@ func checkRepoAccess(proxy *Proxy, repos []string) ([]repoAccessInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
 
-	results := make([]repoAccessInfo, 0, len(repos))
-	for _, repo := range repos {
-		info, err := gh.GetRepo(ctx, repo)
-		if err != nil {
-			results = append(results, repoAccessInfo{Repo: repo, Permission: "none", Err: err.Error()})
-			continue
-		}
-		permission := "none"
-		switch {
-		case info.Permissions.Admin:
-			permission = "admin"
-		case info.Permissions.Push:
-			permission = "write"
-		case info.Permissions.Triage:
-			permission = "triage"
-		case info.Permissions.Pull:
-			permission = "read"
-		}
-		hooks, hookErr := gh.ListHooks(ctx, repo)
-		results = append(results, repoAccessInfo{
-			Repo:         repo,
-			Permission:   permission,
-			WebhookReady: hookErr == nil && hooks != nil,
-		})
+	const workers = 4
+	results := make([]repoAccessInfo, len(repos))
+	sem := make(chan struct{}, workers)
+	var wg sync.WaitGroup
+	for index, repo := range repos {
+		wg.Add(1)
+		go func(index int, repo string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			info, err := gh.GetRepo(ctx, repo)
+			if err != nil {
+				results[index] = repoAccessInfo{Repo: repo, Permission: "none", Err: err.Error()}
+				return
+			}
+			permission := "none"
+			switch {
+			case info.Permissions.Admin:
+				permission = "admin"
+			case info.Permissions.Push:
+				permission = "write"
+			case info.Permissions.Triage:
+				permission = "triage"
+			case info.Permissions.Pull:
+				permission = "read"
+			}
+			hooks, hookErr := gh.ListHooks(ctx, repo)
+			results[index] = repoAccessInfo{
+				Repo:         repo,
+				Permission:   permission,
+				WebhookReady: hookErr == nil && hooks != nil,
+			}
+		}(index, repo)
 	}
+	wg.Wait()
 	return results, nil
 }
 

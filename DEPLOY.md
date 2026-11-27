@@ -123,6 +123,10 @@ Notes: personal repos cannot grant Admin to a collaborator — the daemon then
 creates no webhook and polls. Organization repos can. Do not grant more repos
 than $REPOS.
 
+The dashboard's **Projects** page (`/projects`) shows the same per-repo role and
+whether the token may manage webhooks, and links each repository to its
+collaborator settings, so a human can grant Write/Admin without a terminal.
+
 ## 3. Install — ENSURE
 
 Prebuilt archives (no Go needed): download the matching
@@ -246,7 +250,7 @@ Optional: `pollIntervalSec` (30), `webhook` (true), `maxFixRounds` (3),
 `selfUpdate` (false), `followMaster` (false), `updateProxy` (empty = direct only), `webPort` (0 = off;
 `8787` serves the dashboard on 127.0.0.1), `planTimeoutMin` (15),
 `implementTimeoutMin` (60), `worktreeRoot` (state dir), `language` (`auto`),
-`mode` (`auto`).
+`mode` (`auto`), `autoReview` per repository (**true**).
 
 `updateProxy` is a download mirror prefix for release assets, not an HTTP
 proxy: when the direct download from github.com fails, the daemon retries
@@ -274,8 +278,37 @@ falls back to the plan, so an issue never gets stuck; in `auto` an explicit
 rejected when the config loads. `bug`-labelled issues always skip the plan.
 
 Per-repo overrides: the `repos` object form can set `codingAgent`, `model`,
-`approvers`, `worktreeRoot`, `language`, `mode`, or a `release` block for one
-repository.
+`approvers`, `worktreeRoot`, `language`, `mode`, `autoReview`, or a `release`
+block for one repository.
+
+### 4.1.1 Automatic pull request review (`autoReview`, per repo)
+
+```json
+{
+  "repos": {
+    "me/app": { "autoReview": false }
+  }
+}
+```
+
+| key | default | meaning |
+| --- | --- | --- |
+| `autoReview` | `true` | review every new pull-request head without a command |
+
+A watched repository reviews pull requests it did not open itself: when a PR
+is opened, reopened, pushed to (synchronize) or marked ready for review, the
+daemon reviews the new head exactly like `@agent review` — same plan-queue
+slot, same review comment, same 👍-to-apply prompt — and the PR author gets an
+👀 reaction while it runs. Draft PRs, the bot's own PRs and a head that was
+already reviewed are skipped; a failed review of one head is not retried
+automatically (a new push or the manual `@agent review` command is the
+retry). Disabling costs nothing extra: a repo with `autoReview: false` never
+fetches the pull request itself, and the webhook `pull_request` event is
+ignored. Every new PR head consumes one full agent run, so keep an eye on the
+token and agent quota on busy repositories. The very first poll of a newly
+watched repository (no stored poll timestamp yet) counts every open PR as
+updated and reviews each current head once; afterwards only PRs that changed
+since the previous poll are picked up.
 
 The running daemon watches the config file with the OS notification API
 (inotify / kqueue via fsnotify, debounced, with a 30 s safety poll). A valid save
@@ -283,7 +316,7 @@ triggers a graceful re-exec: it waits for running jobs, then replaces itself
 with the new config, keeping the PID and the lock. An invalid save is logged
 and ignored, so the old settings stay active.
 
-### 4.1.1 Periodic releases (optional, per repo)
+### 4.1.2 Periodic releases (optional, per repo)
 
 ```json
 {
@@ -292,7 +325,8 @@ and ignored, so the old settings stay active.
       "release": {
         "enabled": true,
         "intervalDays": 1,
-        "time": "09:00"
+        "time": "09:00",
+        "vPrefix": true
       }
     }
   }
@@ -304,14 +338,15 @@ and ignored, so the old settings stay active.
 | `enabled` | `false` | publish releases for this repository |
 | `intervalDays` | `1` | minimum days between checks |
 | `time` | `"09:00"` | local publish time of day (`HH:MM`, daemon host time zone) |
+| `vPrefix` | `true` | write `v1.2.3` tags; `false` writes bare `1.2.3` tags |
 
 The dashboard shows the same block: **Settings → Repositories** picks a project
-from the dropdown and gives it a card with the release switch, the interval and
-the time; saving writes them back into `repos` (keeping `codingAgent`, `model`,
-`language` and the other overrides) before restarting the daemon. A project left
-on the default values writes no `release` block, so the file stays free of
-no-op blocks. An unusable `time` is rejected at load time and by the dashboard
-save instead of falling back silently.
+from the dropdown and gives it a card with the release switch, the interval, the
+time and the `v` prefix switch; saving writes them back into `repos` (keeping
+`codingAgent`, `model`, `language` and the other overrides) before restarting the
+daemon. A project left on the default values writes no `release` block, so the
+file stays free of no-op blocks. An unusable `time` is rejected at load time and
+by the dashboard save instead of falling back silently.
 
 The same project card sets that repository's coding agent, model and language.
 Each has a "follow global" choice that removes the key instead of pinning
@@ -325,8 +360,12 @@ The bump part is not configurable because it follows the conventional commits:
 a `feat`/`feature` subject (including `feat(scope):`) bumps the minor part,
 anything else bumps the patch part. A **major** release is a deliberate human
 decision and is never published automatically — cut the `vX.0.0` tag yourself
-when you mean it. The newest `vMAJOR.MINOR.PATCH` tag is the version source. A
-repository without a version tag publishes `v0.1.0` as its first release, since
+when you mean it. The newest `MAJOR.MINOR.PATCH` tag is the version source,
+with or without a leading `v`; `vPrefix` decides which form the daemon writes
+(`v1.2.3` by default, `1.2.3` with `false`). Because both forms are parsed,
+turning the prefix on or off keeps counting from the tags that already exist
+instead of starting over. A repository without a version tag publishes
+`v0.1.0` (or `0.1.0` when `vPrefix` is false) as its first release, since
 a bump describes a change relative to a published version. A check lists the
 commits on the default branch since that tag, bumps once, then creates the tag
 and the release on the default branch. The release body lists those commit
@@ -603,9 +642,9 @@ merges the base into the PR branch, the agent resolves the markers with
 merged. A conflict that appears at merge time (the base moved after the gate) is
 caught from the 405/409 response and resolved the same way.
 For user-visible UI changes the agent captures the changed region (tight crop)
-before and after; the daemon stacks them (before on top) with a divider and
-uploads the image through GitHub's user-attachments endpoint. Backend, docs and
-test-only PRs get no screenshots and say so.
+before and after; the daemon uploads both images as separate screenshots through
+GitHub's user-attachments endpoint and separates them with a Markdown rule.
+Backend, docs and test-only PRs get no screenshots and say so.
 
 **Logs.** `$STATE/logs/daemon.log`, rotated at 10 MB × 5 by the daemon itself
 (pure Go). DEBUG level by default; `-logs` follows it and colorizes on a TTY

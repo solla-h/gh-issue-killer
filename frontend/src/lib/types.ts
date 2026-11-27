@@ -23,6 +23,7 @@ export interface RepoInfo {
 
 export interface Task {
 	repo: string;
+	kind: 'issue' | 'review';
 	number: number;
 	title: string;
 	url: string;
@@ -158,5 +159,43 @@ export interface UpdatePayload {
 	url: string;
 	notes: string;
 	installed: boolean;
+	error?: string;
+}
+
+export type ProjectPermission = 'admin' | 'write' | 'triage' | 'read' | 'none' | 'unknown';
+
+/** One row of the projects list: what the daemon knows without asking GitHub. */
+export interface ProjectInfo {
+	name: string;
+	base: string;
+	agent: string;
+	model: string;
+	mode: string;
+	approvers: string[];
+	hookId: number;
+	smee: string;
+	lastPoll: string;
+	accessUrl: string;
+}
+
+export interface ProjectsPayload {
+	bot: string;
+	config: string;
+	webhook: boolean;
+	repos: ProjectInfo[];
+}
+
+/** The bot's role on one repository; filled in after the list has rendered. */
+export interface ProjectAccess {
+	name: string;
+	permission: ProjectPermission;
+	canPush: boolean;
+	canAdmin: boolean;
+	webhookReady: boolean;
+	error?: string;
+}
+
+export interface ProjectsAccessPayload {
+	repos: ProjectAccess[];
 	error?: string;
 }
