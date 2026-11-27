@@ -443,16 +443,24 @@ check run finished green, it queues the merge path but leaves the flag set until
 that job runs. A lost queued job is therefore picked up by a later scan while
 the phase is still `blocked`, provided `BlockedByCI` remains true. A phase
 `merging` issue with a PR number is resumed regardless of `BlockedByCI` (plain
-thumbs-up merges included), once no job owns the issue. The merge path finishes
-an already-merged PR exactly like a successful merge: it closes the GitHub
-issue, records `MergedAt`, posts the merge-done comment and removes the worktree,
-so the next poll does not mistake the still-open `done` issue for a reopen.
-The flag also stays set when the retry job exits through an early guard (closed
-issue, changed phase, missing PR) and when the merge re-blocks on CI after
-running, so those outcomes remain retryable. `doMerge` owns the terminal phase
-and flag: every non-CI outcome clears `BlockedByCI`, while a CI re-block keeps it
-set for the next retry. Other blocked reasons (local checks, an unreproducible
-bug, exhausted conflict rounds) never resume on their own.
+thumbs-up merges included), once no job owns the issue. That resume is one-shot
+per daemon process: if the job leaves `merging` behind again (a panic, a
+persistent API error) later polls do not re-enqueue, so a broken merge cannot
+restart every 30 s; a restarted daemon gets one fresh attempt. The merge path
+finishes an already-merged PR exactly like a successful merge: it closes the
+GitHub issue when still open, records `MergedAt`, posts the merge-done comment
+and removes the worktree, so the next poll does not mistake the still-open
+`done` issue for a reopen. The daemon's PR body carries `Closes #N`, so GitHub
+closes the issue as soon as the merge lands; the realistic crash state is
+therefore a closed issue with `phase=merging`. The resume finishes that state
+through the merged PR, or cancels and cleans up a closed issue whose PR did not
+merge. The flag stays set when the retry job exits through an early guard (a
+closed issue whose phase is not `merging`, a changed phase, a missing PR, a
+failed `GetIssue`) and when the merge re-blocks on CI after running, so those
+outcomes remain retryable. `doMerge` owns the terminal phase and flag: every
+non-CI outcome clears `BlockedByCI`, while a CI re-block keeps it set for the
+next retry. Other blocked reasons (local checks, an unreproducible bug,
+exhausted conflict rounds) never resume on their own.
 
 ## 10. Checks, manifest and screenshots
 

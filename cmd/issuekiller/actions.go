@@ -2405,6 +2405,7 @@ func doCloseIssue(ctx context.Context, app *AppContext, issue Issue, st IssueSta
 		state.Phase = "cancelled"
 		state.CancelledAt = nowISO()
 		state.IssueClosed = true
+		state.BlockedByCI = false
 	})
 	app.GH.SetAgentState(ctx, app.Repo.FullName, number, "")
 }

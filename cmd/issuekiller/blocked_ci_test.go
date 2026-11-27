@@ -208,9 +208,158 @@ func TestRetryBlockedCIResumesInterruptedMerge(t *testing.T) {
 	}
 }
 
+// A merge that keeps failing must not restart on every poll. The process
+// remembers one resume; a new process (a restart) gets one fresh attempt.
+func TestRetryBlockedCIResumeIsBoundedPerProcess(t *testing.T) {
+	store := &Store{file: filepath.Join(t.TempDir(), "state.json"), state: State{Version: 1, Repos: map[string]*RepoState{}}}
+	store.UpdateIssue("acme/app", 5, func(st *IssueState) {
+		st.Phase = "merging"
+		st.PRNumber = 50
+	})
+	gh, _ := newFakeAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/repos/acme/app/issues/5" {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	})
+	app := &AppContext{
+		Repo:  RepoConfig{FullName: "acme/app"},
+		GH:    gh,
+		Store: store,
+		Log:   NewSilentLogger(),
+	}
+	pool := &repoPool{plan: make(chan routerJob, 1), work: make(chan routerJob, 1), ci: make(chan routerJob, 1)}
+	router := &Router{
+		store: store, log: NewSilentLogger(),
+		pools:  map[string]*repoPool{"acme/app": pool},
+		active: map[string]bool{}, queued: map[string]bool{}, cancels: map[string]context.CancelFunc{},
+	}
+	router.retryBlockedCI(context.Background(), app)
+	if got := len(pool.work); got != 1 {
+		t.Fatalf("first scan queued %d jobs, want 1", got)
+	}
+	key := "acme/app#5"
+	job := <-pool.work
+	// Run the job the way the worker would, then release the key: the GetIssue
+	// failure leaves the phase at merging, the case that used to loop.
+	router.mu.Lock()
+	delete(router.queued, key)
+	router.active[key] = true
+	router.mu.Unlock()
+	job.fn(context.Background())
+	router.mu.Lock()
+	delete(router.active, key)
+	router.mu.Unlock()
+	if got := store.Issue("acme/app", 5).Phase; got != "merging" {
+		t.Fatalf("phase = %q, want merging after the failed resume", got)
+	}
+	router.retryBlockedCI(context.Background(), app)
+	if got := len(pool.work); got != 0 {
+		t.Fatalf("second scan in the same process queued %d jobs, want 0", got)
+	}
+
+	restarted := &Router{
+		store: store, log: NewSilentLogger(),
+		pools:  map[string]*repoPool{"acme/app": pool},
+		active: map[string]bool{}, queued: map[string]bool{}, cancels: map[string]context.CancelFunc{},
+	}
+	restarted.retryBlockedCI(context.Background(), app)
+	if got := len(pool.work); got != 1 {
+		t.Fatalf("restarted process queued %d jobs, want 1", got)
+	}
+}
+
 // Re-entering doMerge for an interrupted merge finishes the issue when the PR
-// already merged: close it, record the merge and remove the worktree.
+// already merged: close it, record the merge and remove the worktree. GitHub
+// closes the issue through the PR body's "Closes #N", so the production crash
+// leaves it closed, not open.
 func TestRetryBlockedCICompletesAlreadyMergedPR(t *testing.T) {
+	for _, issueState := range []string{"open", "closed"} {
+		t.Run(issueState+" issue", func(t *testing.T) {
+			oldState := stateDirOverride
+			stateDirOverride = t.TempDir()
+			t.Cleanup(func() { stateDirOverride = oldState })
+			worktree := filepath.Join(treesDir(), "issue-5")
+			if err := os.MkdirAll(worktree, 0o755); err != nil {
+				t.Fatalf("create worktree: %v", err)
+			}
+			store := &Store{file: filepath.Join(t.TempDir(), "state.json"), state: State{Version: 1, Repos: map[string]*RepoState{}}}
+			store.UpdateIssue("acme/app", 5, func(st *IssueState) {
+				st.Phase = "merging"
+				st.BlockedByCI = true
+				st.PRNumber = 50
+				st.Branch = "agent/issue-5-test"
+				st.Worktree = worktree
+			})
+			gh, calls := newFakeAPI(t, func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/app/issues/5":
+					_ = json.NewEncoder(w).Encode(map[string]any{"number": 5, "state": issueState})
+				case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/app/pulls/50":
+					_ = json.NewEncoder(w).Encode(map[string]any{"number": 50, "state": "closed", "merged": true})
+				case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/labels"):
+					_ = json.NewEncoder(w).Encode([]any{})
+				default:
+					_ = json.NewEncoder(w).Encode(map[string]any{})
+				}
+			})
+			app := &AppContext{
+				Cfg:   &Config{MaxFixRounds: 1},
+				Repo:  RepoConfig{FullName: "acme/app"},
+				Local: &LocalRepo{Dir: t.TempDir()},
+				GH:    gh,
+				Store: store,
+				Log:   NewSilentLogger(),
+			}
+			pool := &repoPool{plan: make(chan routerJob, 1), work: make(chan routerJob, 1), ci: make(chan routerJob, 1)}
+			router := &Router{
+				store: store, log: NewSilentLogger(),
+				pools:  map[string]*repoPool{"acme/app": pool},
+				active: map[string]bool{}, queued: map[string]bool{}, cancels: map[string]context.CancelFunc{},
+			}
+			router.retryBlockedCI(context.Background(), app)
+			if got := len(pool.work); got != 1 {
+				t.Fatalf("scan queued %d jobs, want 1", got)
+			}
+			job := <-pool.work
+			job.fn(context.Background())
+			got := store.Issue("acme/app", 5)
+			if got.Phase != "done" {
+				t.Fatalf("phase = %q, want done", got.Phase)
+			}
+			if got.BlockedByCI {
+				t.Fatal("finishing an already-merged PR kept BlockedByCI set")
+			}
+			if got.MergedAt == "" {
+				t.Fatal("finishing an already-merged PR did not record MergedAt")
+			}
+			if _, err := os.Stat(worktree); !os.IsNotExist(err) {
+				t.Fatalf("worktree %s still exists after the recovered merge", worktree)
+			}
+			closed, commented := false, false
+			for _, call := range calls.snapshot() {
+				if call.method == http.MethodPatch && call.path == "/repos/acme/app/issues/5" &&
+					strings.Contains(call.body, `"state":"closed"`) {
+					closed = true
+				}
+				if call.method == http.MethodPost && call.path == "/repos/acme/app/issues/5/comments" {
+					commented = true
+				}
+			}
+			if wantClosed := issueState == "open"; closed != wantClosed {
+				t.Fatalf("close call = %v, want %v for a %s issue", closed, wantClosed, issueState)
+			}
+			if !commented {
+				t.Fatal("finishing an already-merged PR did not post the merge-done comment")
+			}
+		})
+	}
+}
+
+// A closed issue whose PR did not merge is a cancelled task, not a merge to
+// finish. Leaving phase=merging would make every poll enqueue the same job.
+func TestRetryBlockedCICancelsClosedIssueWithUnmergedPR(t *testing.T) {
 	oldState := stateDirOverride
 	stateDirOverride = t.TempDir()
 	t.Cleanup(func() { stateDirOverride = oldState })
@@ -226,12 +375,12 @@ func TestRetryBlockedCICompletesAlreadyMergedPR(t *testing.T) {
 		st.Branch = "agent/issue-5-test"
 		st.Worktree = worktree
 	})
-	gh, calls := newFakeAPI(t, func(w http.ResponseWriter, r *http.Request) {
+	gh, _ := newFakeAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/app/issues/5":
-			_ = json.NewEncoder(w).Encode(map[string]any{"number": 5, "state": "open"})
+			_ = json.NewEncoder(w).Encode(map[string]any{"number": 5, "state": "closed"})
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/app/pulls/50":
-			_ = json.NewEncoder(w).Encode(map[string]any{"number": 50, "state": "closed", "merged": true})
+			_ = json.NewEncoder(w).Encode(map[string]any{"number": 50, "state": "closed", "merged": false})
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/labels"):
 			_ = json.NewEncoder(w).Encode([]any{})
 		default:
@@ -259,33 +408,17 @@ func TestRetryBlockedCICompletesAlreadyMergedPR(t *testing.T) {
 	job := <-pool.work
 	job.fn(context.Background())
 	got := store.Issue("acme/app", 5)
-	if got.Phase != "done" {
-		t.Fatalf("phase = %q, want done", got.Phase)
+	if got.Phase != "cancelled" {
+		t.Fatalf("phase = %q, want cancelled", got.Phase)
 	}
 	if got.BlockedByCI {
-		t.Fatal("finishing an already-merged PR kept BlockedByCI set")
+		t.Fatal("cancelling a closed issue kept BlockedByCI set")
 	}
-	if got.MergedAt == "" {
-		t.Fatal("finishing an already-merged PR did not record MergedAt")
+	if got.CancelledAt == "" {
+		t.Fatal("cancelling a closed issue did not record CancelledAt")
 	}
 	if _, err := os.Stat(worktree); !os.IsNotExist(err) {
-		t.Fatalf("worktree %s still exists after the recovered merge", worktree)
-	}
-	closed, commented := false, false
-	for _, call := range calls.snapshot() {
-		if call.method == http.MethodPatch && call.path == "/repos/acme/app/issues/5" &&
-			strings.Contains(call.body, `"state":"closed"`) {
-			closed = true
-		}
-		if call.method == http.MethodPost && call.path == "/repos/acme/app/issues/5/comments" {
-			commented = true
-		}
-	}
-	if !closed {
-		t.Fatal("finishing an already-merged PR did not close the issue")
-	}
-	if !commented {
-		t.Fatal("finishing an already-merged PR did not post the merge-done comment")
+		t.Fatalf("worktree %s still exists after the cancelled merge", worktree)
 	}
 }
 
